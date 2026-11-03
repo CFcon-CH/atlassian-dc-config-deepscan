@@ -5330,6 +5330,8 @@ class Cx {
 
 class ConfigOverview {
     static String prefix(String product) { 'cfcon-overview-' + product + '-' }
+    /* The heading of the identity column. The minimal overviews (jiraminimal, confluenceminimal) share it. */
+    static String noun(String product) { product.startsWith('jira') ? 'Project' : 'Space' }
     static String anchor(String name) {
         '<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">' + Cx.esc(name) +
             '</ac:parameter></ac:structured-macro>'
@@ -5387,7 +5389,8 @@ class ConfigOverview {
     static Map<String, Object> read(String body, String product, String space) {
         if (body == null) { throw new IllegalArgumentException('Overview body could not be read.') }
         if (!space) { throw new IllegalArgumentException('Overview space is unknown.') }
-        if (body.contains('cfcon-space-config-export/1') || body.contains('cfcon-project-config-export/1')) {
+        if (body.contains('cfcon-space-config-export/1') || body.contains('cfcon-project-config-export/1') ||
+            body.contains(MinimalReport.JIRA_MARKER) || body.contains(MinimalReport.CONFLUENCE_MARKER)) {
             throw new IllegalArgumentException('A detail export cannot be used as its own overview.')
         }
         List<Map<String, Object>> starts = matches(body, java.util.regex.Pattern.quote(prefix(product) + 'start'))
@@ -5399,7 +5402,8 @@ class ConfigOverview {
             throw new IllegalArgumentException('Overview table markers are missing, duplicated or out of order.')
         }
         String block = body.substring(starts.get(0).end as int, ends.get(0).start as int)
-        def table = java.util.regex.Pattern.compile('(?s)^\\s*<table\\b[^>]*>\\s*<tbody\\b[^>]*>(.*?)</tbody>\\s*</table>\\s*$').matcher(block)
+        /* A minimal overview carries one plain paragraph above its table: the note that the table is generated. */
+        def table = java.util.regex.Pattern.compile('(?s)^\\s*(?:<p>[^<]*</p>\\s*)?<table\\b[^>]*>\\s*<tbody\\b[^>]*>(.*?)</tbody>\\s*</table>\\s*$').matcher(block)
         if (!table.matches()) { throw new IllegalArgumentException('Overview table is malformed.') }
         String tableBody = table.group(1)
         if (tableBody.contains('<table')) { throw new IllegalArgumentException('Overview table is nested.') }
@@ -5429,7 +5433,7 @@ class ConfigOverview {
             if (!keys.add(key)) { throw new IllegalArgumentException('Overview contains duplicate columns.') }
             columns.add([key: key, html: header.get(i)])
         }
-        if (header.isEmpty() || text(header.get(0)) != (product == 'jira' ? 'Project' : 'Space')) {
+        if (header.isEmpty() || text(header.get(0)) != noun(product)) {
             throw new IllegalArgumentException('Overview header is not this exporter\'s header.')
         }
         Set<String> ids = [] as Set
@@ -5483,11 +5487,18 @@ class ConfigOverview {
         List<String> row = [anchor(prefix(product) + 'row-' + pageId) + link(title, space, label, null)]
         for (Map<String, String> column : columns) {
             Map<String, String> section = byKey.get(column.key)
-            row.add(section == null ? '' : link(title, space, section.label + ' (' + section.count + ')', section.anchor))
+            /* A section with html carries its own cell (the minimal overview); every other one links to its anchor. */
+            row.add(section == null ? '' : section.html != null ? section.html :
+                link(title, space, section.label + ' (' + section.count + ')', section.anchor))
         }
         if (found.isEmpty()) { rows.add(row) } else { rows.set(found.get(0), row) }
+        compose(model, product, columns, rows)
+    }
+    static String compose(Map<String, Object> model, String product, List<Map<String, String>> columns, List<List<String>> rows) {
         StringBuilder out = new StringBuilder(model.before.toString())
-        out.append(marker(product, 'start')).append('<table><tbody><tr><th>').append(product == 'jira' ? 'Project' : 'Space').append('</th>')
+        out.append(marker(product, 'start'))
+        if (product.endsWith('minimal')) { out.append('<p>').append(Cx.esc(MinimalReport.OVERVIEW_NOTE)).append('</p>') }
+        out.append('<table><tbody><tr><th>').append(noun(product)).append('</th>')
         columns.each { out.append('<th>').append(it.html).append('</th>') }
         out.append('</tr>')
         rows.each { cells ->
@@ -5509,6 +5520,10 @@ class ConfigOverview {
             int column = columns.findIndexOf { it.key == section.key }
             if (column < 0) { return false }
             String cell = row.get(column + 1)
+            if (section.html != null) {
+                if (text(cell) != text(section.html)) { return false }
+                continue
+            }
             def resource = java.util.regex.Pattern.compile('<ri:page\\b[^>]*/>').matcher(cell)
             def target = java.util.regex.Pattern.compile('<ac:link\\b[^>]*>').matcher(cell)
             if (text(cell) != Cx.plainText(Cx.esc(section.label + ' (' + section.count + ')')) || !resource.find() || !target.find() ||
@@ -5591,7 +5606,7 @@ class ConfigOverview {
 
 class OverviewExport {
     static Map maintain(String product, String parentId, String pageId, String title, String space, String label,
-                        List<Map<String, String>> sections, Closure reader, Closure writer) {
+                        List<Map<String, String>> sections, Closure reader, Closure writer, Closure adjust = null) {
         if (!parentId) { return [state: 'skipped', reason: 'No overview page was selected.'] }
         String stage = 'read'
         try {
@@ -5602,6 +5617,8 @@ class OverviewExport {
                 return [state: 'failed', reason: 'Overview identity, body or version could not be confirmed. ' + (page.error ?: '')]
             }
             String merged = ConfigOverview.upsert(page.storage.toString(), product, pageId, title, space, label, sections)
+            /* The minimal export marks rows of objects that no longer exist; it never removes one. */
+            if (adjust != null) { merged = (String) adjust.call(merged) }
             stage = 'write'
             Map saved
             try { saved = (Map) writer.call(page, merged) }
@@ -5695,6 +5712,247 @@ class OverviewExport {
             totals.put(result, (totals.get(result) ?: 0) + 1)
         }
         totals
+    }
+}
+
+/* The minimal report: one small page per project or space and a summary row on the
+ * overview, with the inventory columns of the requirement and the administrators'
+ * topic columns (Themengebiete). The object page is the source of the topics: every
+ * column there that is not a generated one is carried over verbatim, like a Remark,
+ * and shown on the overview. The overview is a summary and is rewritten from the
+ * pages. Pure and identical in both endpoints; the product names the column set. */
+class MinimalReport {
+    static final String JIRA_MARKER = 'cfcon-project-minimal-export/1'
+    static final String CONFLUENCE_MARKER = 'cfcon-space-minimal-export/1'
+    static final String TOPIC = 'topic:'
+    static final String COLUMN = 'minimal-'
+    static final String GONE = 'NO LONGER EXISTS'
+    static final String OVERVIEW_NOTE = 'Generated by the minimal report. Fill in topics (Themengebiete) on the page of ' +
+        'each project or space: this table is rewritten from those pages by every export, so a change made here is overwritten.'
+    static final String GONE_LOZENGE = '<ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Red</ac:parameter>' +
+        '<ac:parameter ac:name="title">' + GONE + '</ac:parameter></ac:structured-macro>'
+    static final java.util.regex.Pattern GONE_MARK = java.util.regex.Pattern.compile(
+        '(?s)\\s*<ac:structured-macro\\b(?=[^>]*\\bac:name="status")[^>]*>(?:(?!</ac:structured-macro>).)*?' +
+        java.util.regex.Pattern.quote(GONE) + '(?:(?!</ac:structured-macro>).)*?</ac:structured-macro>')
+    static final java.util.regex.Pattern MERGED = java.util.regex.Pattern.compile('(?i)\\b(?:rowspan|colspan)\\s*=')
+
+    /* Id and heading of every generated column, in page order. The headings are the
+     * requirement's own; they are what the page read recognises. */
+    static final List<List<String>> JIRA_COLUMNS = [
+        ['key', 'Project key'], ['name', 'Projektname'], ['lead', 'Projekt-Lead'], ['admins', 'Projekt-Admins'],
+        ['category', 'Projekt-Kategorie'], ['issues', 'Anzahl Issues'], ['lastUpdate', 'Last Issue Update']]
+    static final List<List<String>> CONFLUENCE_COLUMNS = [
+        ['key', 'Bereichskey'], ['name', 'Bereichsname'], ['description', 'Bereichsbeschreibung'], ['category', 'Kategorie'],
+        ['admins', 'Administratoren'], ['pages', 'Anzahl Seiten'], ['apps', 'Verwendete Apps'],
+        ['appMacros', 'Anzahl App-Makros'], ['userMacros', 'Anzahl User-Makros']]
+
+    static boolean jira(String product) { product == 'jira' }
+    static List<List<String>> columns(String product) { jira(product) ? JIRA_COLUMNS : CONFLUENCE_COLUMNS }
+    static String marker(String product) { jira(product) ? JIRA_MARKER : CONFLUENCE_MARKER }
+    static String overviewProduct(String product) { product + 'minimal' }
+    static String title(String product, String key) {
+        String candidate = (jira(product) ? 'Jira project overview - ' : 'Confluence space overview - ') +
+            (key == null || key.trim().isEmpty() ? 'unknown' : key.trim())
+        candidate.length() > 255 ? candidate.substring(0, 255) : candidate
+    }
+    static String href(String product, String baseUrl, String key) {
+        if (baseUrl == null || baseUrl.trim().isEmpty() || key == null || key.trim().isEmpty()) { return null }
+        String base = baseUrl.trim()
+        while (base.endsWith('/')) { base = base.substring(0, base.length() - 1) }
+        String path = URLEncoder.encode(key.trim(), 'UTF-8').replace('+', '%20')
+        jira(product) ? base + '/projects/' + path + '/issues' : base + '/display/' + path + '/'
+    }
+
+    /* One payload value: [value: text or list, state: read|absent|failed|partial|notMeasured, note].
+     * A failed or unmeasured read says so in the cell; it is never written as empty or zero. */
+    static String shown(Object raw) {
+        Map<String, Object> entry = raw instanceof Map ? (Map<String, Object>) raw : ([value: raw] as Map<String, Object>)
+        Object content = entry.get('value')
+        if (content instanceof Collection) {
+            List<String> parts = []
+            for (Object part : (Collection) content) { if (part != null && !String.valueOf(part).trim().isEmpty()) { parts.add(String.valueOf(part).trim()) } }
+            return parts.join(', ')
+        }
+        content == null ? '' : String.valueOf(content).trim()
+    }
+    static String state(Object raw) {
+        Object value = raw instanceof Map ? ((Map) raw).get('state') : null
+        value == null ? 'read' : String.valueOf(value)
+    }
+    static String cell(String product, String baseUrl, String id, Object raw) {
+        String state = state(raw)
+        Object noteValue = raw instanceof Map ? ((Map) raw).get('note') : null
+        String note = noteValue == null || String.valueOf(noteValue).trim().isEmpty() ? '' : ': ' + String.valueOf(noteValue).trim()
+        if (state == 'failed') { return '<em>' + Cx.esc('unreadable' + note) + '</em>' }
+        if (state == 'notMeasured') { return '<em>' + Cx.esc('not measured' + note) + '</em>' }
+        if (state == 'absent') { return '' }
+        String text = shown(raw)
+        String body = Cx.esc(state == 'partial' && !text.isEmpty() ? text + ' *' : text)
+        String link = id == 'key' ? href(product, baseUrl, text) : null
+        link == null ? body : '<a href="' + Cx.esc(link) + '">' + body + '</a>'
+    }
+
+    static Map<String, Object> refused(String reason) { [ok: false, reason: reason, topics: new LinkedHashMap<String, String>()] as Map<String, Object> }
+
+    /* The topics of an existing object page, header to cell, in page order. Fail closed:
+     * whatever this read cannot place exactly refuses the write, because a topic that
+     * cannot be read is a topic that must not be overwritten. */
+    static Map<String, Object> parse(String storage, String product) {
+        try {
+            if (storage == null || storage.trim().isEmpty()) {
+                return refused('The existing page has an empty body. It was not produced by this export, so it is not overwritten.')
+            }
+            if (!storage.contains(marker(product))) {
+                return refused('The existing page does not carry the export marker "' + marker(product) +
+                    '". It was not produced by this export, so it is not overwritten.')
+            }
+            if (Cx.hasNestedTableBody(storage)) {
+                return refused('A table is nested inside another table on the existing page. Take it out of the topic cell and export again; nothing is written.')
+            }
+            List<String> labels = []
+            for (List<String> column : columns(product)) { labels.add(column.get(1)) }
+            List<List<String>> table = null
+            boolean merged = false
+            int tables = 0
+            java.util.regex.Matcher bodies = Cx.TBODY.matcher(storage)
+            while (bodies.find()) {
+                List<List<String>> rows = []
+                boolean mergedHere = false
+                java.util.regex.Matcher rowMatcher = Cx.ROW.matcher(bodies.group(1))
+                while (rowMatcher.find()) {
+                    if (MERGED.matcher(rowMatcher.group(1)).find()) { mergedHere = true }
+                    rows.add(Cx.cellsOf(rowMatcher.group(1)))
+                }
+                if (rows.isEmpty() || Cx.headerIndex(rows.get(0), labels.get(0)) < 0) { continue }
+                tables++
+                table = rows
+                merged = mergedHere
+            }
+            if (tables != 1 || table == null) {
+                return refused('The existing page carries ' + tables + ' table(s) with the column "' + labels.get(0) +
+                    '" where exactly one is expected. Nothing is written.')
+            }
+            if (merged) { return refused('The table on the existing page uses merged cells, which cannot be carried over safely. Nothing is written.') }
+            List<String> header = table.get(0)
+            Set<Integer> generated = new HashSet<Integer>()
+            for (String label : labels) {
+                List<Integer> found = []
+                for (int i = 0; i < header.size(); i++) { if (Cx.plainText(header.get(i)).equalsIgnoreCase(label)) { found.add(i) } }
+                if (found.size() != 1) {
+                    return refused('The column "' + label + '" is ' + (found.isEmpty() ? 'missing from' : 'repeated on') +
+                        ' the existing page. Restore it and export again; nothing is written.')
+                }
+                generated.add(found.get(0))
+            }
+            List<List<String>> data = []
+            for (int i = 1; i < table.size(); i++) {
+                List<String> cells = table.get(i)
+                if (!cells.every { String value -> Cx.isEmptyCell(value) }) { data.add(cells) }
+            }
+            if (data.size() > 1) { return refused('The table on the existing page carries ' + data.size() + ' data rows where one is expected. Nothing is written.') }
+            List<String> values = data.isEmpty() ? new ArrayList<String>() : data.get(0)
+            if (!values.isEmpty() && values.size() != header.size()) {
+                return refused('The data row of the existing page carries ' + values.size() + ' cell(s) under ' + header.size() + ' heading(s). Nothing is written.')
+            }
+            Map<String, String> topics = new LinkedHashMap<String, String>()
+            Set<String> seen = new HashSet<String>()
+            for (int i = 0; i < header.size(); i++) {
+                if (generated.contains(i)) { continue }
+                String name = Cx.plainText(header.get(i))
+                String value = values.isEmpty() ? '' : values.get(i).trim()
+                boolean empty = Cx.isEmptyCell(value)
+                if (name.isEmpty()) {
+                    if (empty) { continue }
+                    return refused('A column without a heading carries content on the existing page. Give it a heading and export again; nothing is written.')
+                }
+                if (!seen.add(name.toLowerCase(Locale.ROOT))) {
+                    return refused('The topic "' + name + '" appears more than once on the existing page. Nothing is written.')
+                }
+                topics.put(name, empty ? '' : value)
+            }
+            [ok: true, reason: null, topics: topics] as Map<String, Object>
+        } catch (Throwable error) {
+            refused('The topic read failed (' + Cx.errorDetail(error) + '); nothing is written.')
+        }
+    }
+
+    /* The topic headings the overview already holds, in column order. No overview yet is no topic. */
+    static List<String> knownTopics(String overviewBody, String product, String space) {
+        List<String> names = []
+        if (overviewBody == null) { return names }
+        Map<String, Object> model = ConfigOverview.read(overviewBody, overviewProduct(product), space)
+        for (Map<String, String> column : (List<Map<String, String>>) model.columns) {
+            if (column.key.startsWith(TOPIC)) { names.add(column.key.substring(TOPIC.length())) }
+        }
+        names
+    }
+    /* One topic set for every page: the overview's order first, then topics only this page knows. */
+    static List<String> topicOrder(List<String> known, Collection<String> onPage) {
+        List<String> order = []
+        Set<String> seen = new HashSet<String>()
+        List<String> all = new ArrayList<String>(known == null ? new ArrayList<String>() : known)
+        if (onPage != null) { all.addAll(onPage) }
+        for (String name : all) {
+            if (name != null && !name.trim().isEmpty() && seen.add(name.trim().toLowerCase(Locale.ROOT))) { order.add(name.trim()) }
+        }
+        order
+    }
+
+    /* The object page, and the cells of its overview row. item maps a column id to its payload value. */
+    static Map<String, Object> render(String product, String baseUrl, Map<String, Object> item, Map<String, String> pageTopics,
+                                      List<String> knownTopics, String generatedAt, String version) {
+        Map<String, String> byName = new HashMap<String, String>()
+        for (Map.Entry<String, String> entry : pageTopics.entrySet()) { byName.put(entry.getKey().toLowerCase(Locale.ROOT), entry.getValue()) }
+        List<String> topics = topicOrder(knownTopics, pageTopics.keySet())
+        String noun = jira(product) ? 'project' : 'space'
+        StringBuilder out = new StringBuilder()
+        out.append('<p>Overview of ').append(noun).append(' <strong>').append(Cx.esc(shown(item.get('name')) ?: 'unknown'))
+        out.append('</strong> (').append(Cx.esc(shown(item.get('key')) ?: '?')).append('). Generated ')
+        out.append(Cx.esc(generatedAt ?: 'unknown')).append(' by the minimal report v').append(Cx.esc(version ?: '?')).append('.</p>')
+        out.append('<p>Add a column for each topic (Themengebiet) and fill it in on this page. Every column that is not ')
+        out.append('one of the generated ones is kept on the next export and shown on the overview page. Everything else ')
+        out.append('on this page is overwritten each time.</p>')
+        List<Map<String, String>> sections = []
+        StringBuilder head = new StringBuilder('<tr>')
+        StringBuilder row = new StringBuilder('<tr>')
+        for (List<String> column : columns(product)) {
+            String html = cell(product, baseUrl, column.get(0), item.get(column.get(0)))
+            head.append('<th>').append(Cx.esc(column.get(1))).append('</th>')
+            row.append('<td>').append(html).append('</td>')
+            if (column.get(0) != 'name') {
+                sections.add([key: COLUMN + column.get(0), column: column.get(1), label: column.get(1), anchor: '', count: '', html: html] as Map<String, String>)
+            }
+        }
+        for (String topic : topics) {
+            String html = byName.get(topic.toLowerCase(Locale.ROOT)) ?: ''
+            head.append('<th>').append(Cx.esc(topic)).append('</th>')
+            row.append('<td>').append(html).append('</td>')
+            sections.add([key: TOPIC + topic, column: topic, label: topic, anchor: '', count: '', html: html] as Map<String, String>)
+        }
+        out.append('<table><tbody>').append(head).append('</tr>').append(row).append('</tr></tbody></table>')
+        out.append('<p><em>').append(Cx.esc(marker(product))).append('</em></p>')
+        [storage: out.toString(), sections: sections, topics: topics] as Map<String, Object>
+    }
+
+    /* Marks the overview rows whose key is not among the existing ones, and unmarks a key
+     * that exists again. Nothing is removed. Without a complete key list nothing changes. */
+    static String markGone(String body, String product, String space, Set<String> existingKeys) {
+        if (existingKeys == null) { return body }
+        String overview = overviewProduct(product)
+        Map<String, Object> model = ConfigOverview.read(body, overview, space)
+        List<Map<String, String>> columns = (List<Map<String, String>>) model.columns
+        List<List<String>> rows = (List<List<String>>) model.rows
+        int keyColumn = columns.findIndexOf { Map<String, String> column -> column.key == COLUMN + 'key' }
+        if (keyColumn < 0) { return body }
+        boolean changed = false
+        for (List<String> cells : rows) {
+            String current = cells.get(keyColumn + 1)
+            String clean = GONE_MARK.matcher(current).replaceAll('')
+            String key = Cx.plainText(clean)
+            String next = key.isEmpty() || existingKeys.contains(key) ? clean : clean + ' ' + GONE_LOZENGE
+            if (next != current) { cells.set(keyColumn + 1, next); changed = true }
+        }
+        changed ? ConfigOverview.compose(model, overview, columns, rows) : body
     }
 }
 

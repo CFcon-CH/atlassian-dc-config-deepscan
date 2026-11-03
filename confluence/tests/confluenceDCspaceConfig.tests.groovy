@@ -2305,6 +2305,7 @@ ok("OP-1458 the JSON carries no dropped link either",
 
 new GroovyShell(getClass().classLoader, new Binding([product: 'confluence', renderDetail: { Map request -> Cx.render(request, null) }])).evaluate(new File(System.getProperty('repoRoot', '.'), 'tools/tests/export-overview.tests.groovy'))
 new GroovyShell(getClass().classLoader, new Binding([product: 'confluence'])).evaluate(new File(System.getProperty('repoRoot', '.'), 'tools/tests/export-log.tests.groovy'))
+new GroovyShell(getClass().classLoader, new Binding([product: 'confluence'])).evaluate(new File(System.getProperty('repoRoot', '.'), 'tools/tests/minimal-report.tests.groovy'))
 
 /* ---- result --------------------------------------------------------------- */
 

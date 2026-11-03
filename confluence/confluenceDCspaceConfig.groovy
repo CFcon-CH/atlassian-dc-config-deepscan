@@ -24,6 +24,10 @@
  *   this space configured", never "how much content is in it". That keeps the run
  *   cheap enough to be harmless on a production instance.
  *
+ *   The one exception is opt-in and separate: report=minimal (see "Minimal
+ *   report" below) counts current pages and scans the content index for macro
+ *   usage, once per request over the whole instance. The full report never does.
+ *
  * The landing page: an estate sweep, not a picker
  *   Called without a space, this endpoint returns ONE ROW PER SPACE for EVERY
  *   space, carrying the stored facts an administrator triages on: key, name,
@@ -97,6 +101,11 @@
  *                                                  them closed; full opens all
  *   values=true|false         default false  property VALUES are not read at all
  *                                            unless this is set. See below.
+ *   report=full|minimal       default full   minimal is the reduced inventory:
+ *                                            key, name, description, category,
+ *                                            administrators, page count, used apps,
+ *                                            app and user macros. Without space= it
+ *                                            lists every space; format html|json|csv.
  *
  * Reporting discipline
  *   A failed read is never rendered as an empty child list. A node with no
@@ -254,7 +263,7 @@ class Pc {
     /* The single place the report version lives. The file header points here and
      * every output channel prints this constant, so a report always names the
      * build that produced it. */
-    static final String VERSION = "0.5"
+    static final String VERSION = "0.6"
 
     /* Node states. A node is not just present or absent: it can be present but
      * unreadable, and the report has to keep those apart.
@@ -7909,7 +7918,7 @@ class MinimalScan {
     static final String PLUGIN_METADATA = "com.atlassian.plugin.metadata.PluginMetadataManager"
     static final String USER_MACROS = "com.atlassian.confluence.renderer.UserMacroLibrary"
 
-    static Object call(Object target, String method, Object[] arguments) {
+    static Object invoke(Object target, String method, Object[] arguments) {
         return InvokerHelper.invokeMethod(target, method, arguments)
     }
 
@@ -7922,7 +7931,7 @@ class MinimalScan {
         Map<String, Set<String>> byPlugin = new HashMap<String, Set<String>>()
         try {
             Object manager = ComponentLocator.getComponent(Class.forName(CATALOG))
-            Object all = manager == null ? null : call(manager, "getAllMacroMetadata", new Object[0])
+            Object all = manager == null ? null : invoke(manager, "getAllMacroMetadata", new Object[0])
             if (!(all instanceof Collection)) {
                 gaps.add("the macro catalogue gave no list")
                 return byPlugin
@@ -7931,8 +7940,8 @@ class MinimalScan {
                 String name = null
                 String plugin = null
                 try {
-                    name = text(call(entry, "getMacroName", new Object[0]))
-                    plugin = text(call(entry, "getPluginKey", new Object[0]))
+                    name = text(invoke(entry, "getMacroName", new Object[0]))
+                    plugin = text(invoke(entry, "getPluginKey", new Object[0]))
                 } catch (Throwable ignored) {
                     continue
                 }
@@ -7995,26 +8004,26 @@ class MinimalScan {
                 sourceType = null
             }
             Map<String, Set<String>> catalogNames = catalog(gaps)
-            Object plugins = call(accessor, "getPlugins", new Object[0])
+            Object plugins = invoke(accessor, "getPlugins", new Object[0])
             for (Object plugin : (Collection) plugins) {
-                String key = text(call(plugin, "getKey", new Object[0]))
+                String key = text(invoke(plugin, "getKey", new Object[0]))
                 Object system = null
                 try {
-                    system = pluginMetadata == null ? null : call(pluginMetadata, "isSystemProvided", [plugin] as Object[])
+                    system = pluginMetadata == null ? null : invoke(pluginMetadata, "isSystemProvided", [plugin] as Object[])
                 } catch (Throwable ignored) {
                     system = null
                 }
                 if (Boolean.TRUE.equals(system)) {
                     continue
                 }
-                String appName = text(call(plugin, "getName", new Object[0]))
+                String appName = text(invoke(plugin, "getName", new Object[0]))
                 if (appName == null) {
                     appName = key
                 }
                 Set<String> names = new LinkedHashSet<String>()
                 Object descriptors = null
                 try {
-                    descriptors = call(plugin, "getModuleDescriptors", new Object[0])
+                    descriptors = invoke(plugin, "getModuleDescriptors", new Object[0])
                 } catch (Throwable ignored) {
                     descriptors = null
                 }
@@ -8025,13 +8034,13 @@ class MinimalScan {
                         }
                         String name = null
                         try {
-                            Object metadata = call(descriptor, "getMacroMetadata", new Object[0])
-                            name = metadata == null ? null : text(call(metadata, "getMacroName", new Object[0]))
+                            Object metadata = invoke(descriptor, "getMacroMetadata", new Object[0])
+                            name = metadata == null ? null : text(invoke(metadata, "getMacroName", new Object[0]))
                         } catch (Throwable ignored) {
                             name = null
                         }
                         if (name == null) {
-                            name = text(call(descriptor, "getKey", new Object[0]))
+                            name = text(invoke(descriptor, "getKey", new Object[0]))
                         }
                         if (name != null) {
                             names.add(name)
@@ -8056,13 +8065,13 @@ class MinimalScan {
         Set<String> userNames = new LinkedHashSet<String>()
         try {
             Object library = ComponentLocator.getComponent(Class.forName(USER_MACROS))
-            Object configured = library == null ? null : call(library, "getMacros", new Object[0])
+            Object configured = library == null ? null : invoke(library, "getMacros", new Object[0])
             if (configured instanceof Map) {
                 for (Object entry : ((Map) configured).entrySet()) {
                     Map.Entry pair = (Map.Entry) entry
                     String name = null
                     try {
-                        name = pair.getValue() == null ? null : text(call(pair.getValue(), "getName", new Object[0]))
+                        name = pair.getValue() == null ? null : text(invoke(pair.getValue(), "getName", new Object[0]))
                     } catch (Throwable ignored) {
                         name = null
                     }

@@ -1,6 +1,6 @@
 # Jira project configuration: administrator guide
 
-This guide covers [jiraDCprojectConfig.groovy](../jira/jiraDCprojectConfig.groovy). It inventories the configuration of one Jira Data Center project for handover, audit, or migration planning. The scan does not change Jira configuration or count issues.
+This guide covers [jiraDCprojectConfig.groovy](../jira/jiraDCprojectConfig.groovy). It inventories the configuration of one Jira Data Center project for handover, audit, or migration planning. The scan does not change Jira configuration or count issues; only the optional minimal report reads an issue count and a last update date.
 
 ## Install and open
 
@@ -25,6 +25,7 @@ Opening the URL without `project` shows the project picker. Search by key or nam
 | `format=html\|json\|csv` | `html` | Representation for a selected project. |
 | `depth=collapsed\|full` | `collapsed` | Initial node expansion. `full` can make the page much larger. |
 | `includeInactive=true\|false` | `true` | Include released and archived versions. |
+| `report=full\|minimal` | `full` | `minimal` returns the reduced inventory described under **Minimal report**. With `project` one project, without it every project; `format` applies. |
 
 Example: `?project=ABC&format=csv`. This endpoint has no `numbers` parameter. `depth=top` is not a supported value.
 
@@ -68,6 +69,25 @@ The project picker exports a selection of projects in one run, so an instance wi
 Each project is written exactly as the single export on its report page would write it: the report is read as JSON (`?project=KEY&format=json`) and posted to the same export route, under the title the single export suggests, `Jira project configuration - KEY`. A page with that title is updated and keeps its remarks; otherwise it is created. A parent typed by title is found or created by the first write, and every later write in the run names it by its ID, so one run cannot create the parent twice.
 
 A failed project does not stop the run. After the run, every project that failed or was written with a warning is listed with its reason, and **Retry failed** runs only the failed ones again. Retrying is safe: an existing page is updated, not duplicated. **Stop after the current project** ends the run after the write in progress; the rest is not touched. Keep the tab open until the run has finished: the run happens in the browser, and the page warns before it is closed during a run.
+
+## Minimal report
+
+The minimal report is a reduced inventory of every project: **Project key** (linked to `<jira-base-url>/projects/<KEY>/issues`), **Projektname**, **Projekt-Lead**, **Projekt-Admins**, **Projekt-Kategorie**, **Anzahl Issues** and **Last Issue Update**. It is an option on this endpoint, not a separate tool, and it leaves the full report and its export unchanged.
+
+- `?report=minimal` lists every project as HTML, `&format=json` or `&format=csv` as data, and `&project=ABC` narrows it to one project.
+- **Projekt-Admins** are the actors of the project role **Administrators**: users by display name and groups by group name. Groups are not expanded. An instance without that role says so in the cell.
+- **Anzahl Issues** comes from Jira's issue count per project. **Last Issue Update** is the update date of the most recently updated issue, read with one search that ignores issue security so the value is complete. Where that search is only available with the security of the exporting administrator, the date is marked with `*` as a lower bound. These two values are the only issue data this endpoint reads, and only in the minimal report.
+- A value that could not be read says `unreadable` with the reason; it is never written as empty or zero.
+
+### Export the minimal report
+
+In the project picker, tick the projects, choose the Confluence target as for the bulk export, tick **Minimal report** and press **Export selected (N)**. Each project is written as its own page titled `Jira project overview - KEY`, holding one table with one row. The selected parent receives a separate summary table, one row per project, next to the overview of the full export if there is one. Neither export ever adopts the other's pages: each refuses a page without its own marker.
+
+**Topics (Themengebiete).** Add a column to the table on a project page in the Confluence editor, give it a heading and fill it in. On every later export of that project the column is read back and kept verbatim, including lozenges and links; the generated columns are rewritten. A topic found on one page is added to the summary table, and every project page exported afterwards receives the same topic column, empty, so all pages carry one topic set. The summary table shows the topics of each page. It is rewritten from the project pages on every export, so a change made directly in the summary is overwritten; fill in topics on the project pages. A change on a project page reaches the summary with the next export of that project.
+
+The read of an existing project page is fail-closed, like the Remark carry-over: a page without the minimal marker, a missing or repeated generated column, a repeated topic heading, a column without a heading that holds content, more than one data row, merged cells or a nested table refuse the write for that project. Nothing written on the page is lost.
+
+A summary row whose project no longer exists on this instance (archived projects count as existing) is kept and marked **NO LONGER EXISTS**; delete it by hand if it is not needed. If the project list cannot be read completely, nothing is marked. The minimal report is not recorded in the export log, so the blue log marks keep showing full exports only. With **Minimal report** ticked, the green **in overview** marks refer to the summary table.
 
 ## Limits and troubleshooting
 

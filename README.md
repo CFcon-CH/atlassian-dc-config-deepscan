@@ -218,11 +218,11 @@ that same classpath.
 
 ## Status
 
-Version 0.5. The Jira projectConfig endpoint is in active development and its interface may
+Version 0.6. The Jira projectConfig endpoint is in active development and its interface may
 still change. What
 will not change is the reporting discipline described under Properties: no failed read
-rendered as an empty result, no deep link that is not backed by evidence, no issue counting,
-and no outbound call outside the Confluence export.
+rendered as an empty result, no deep link that is not backed by evidence, no issue counting
+outside the opt-in minimal report, and no outbound call outside the Confluence export.
 
 **Measured on a production-sized instance**, Jira 11.3.10, on a project with 11 671
 configuration items across 14 sections: **1702 ms**, nothing unreadable, one item without a

@@ -35,6 +35,10 @@
  *   enough to be harmless on a production instance and removes the time budget
  *   the sibling app-footprint endpoint needs.
  *
+ *   The one exception is opt-in and separate: report=minimal (see "Minimal
+ *   report" below) reads two issue values per project, the issue count and the
+ *   date of the latest update. The full report never does.
+ *
  * Platform
  *   javax / jakarta neutral. The JAX-RS Response class is resolved at runtime and
  *   the closure parameter is untyped, so no jakarta.* or javax.* import is present.
@@ -51,6 +55,11 @@
  *                                                  them closed; full opens all
  *   includeInactive=true|false default true   archived versions, inactive
  *                                             workflows, hidden fields
+ *   report=full|minimal       default full   minimal is the reduced inventory:
+ *                                            key, name, lead, administrators,
+ *                                            category, issue count, latest update.
+ *                                            Without project= it lists every
+ *                                            project; format html|json|csv apply.
  *
  * Reporting discipline
  *   A failed read is never rendered as an empty child list. A node with no
@@ -182,7 +191,7 @@ class Pc {
     /* The single place the report version lives. The file header points here and
      * every output channel prints this constant, so a report always names the
      * build that produced it. */
-    static final String VERSION = "0.5"
+    static final String VERSION = "0.6"
 
     /* Node states. A node is not just present or absent: it can be present but
      * unreadable, and the report has to keep those apart. */

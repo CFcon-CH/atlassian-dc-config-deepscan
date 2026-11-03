@@ -339,4 +339,14 @@ class Db {
     verify(scanClass.macros(0L).state == 'failed', 'without a search manager nothing is measured')
 }
 
+/* ---- The single export on the report page offers the minimal report too ------- */
+def reportShell = getClass().classLoader.loadClass('Report').getDeclaredConstructor().newInstance()
+if (product == 'jira') { reportShell.projectKey = 'APL'; reportShell.projectName = 'ART' } else { reportShell.spaceKey = 'APL'; reportShell.spaceName = 'ART' }
+String reportPage = getClass().classLoader.loadClass('Render').html(reportShell, [:] as LinkedHashMap, false)
+verify(reportPage.contains('id="exportMinimal"') && reportPage.contains('onchange="exportModeChanged()"'), 'the single export carries the minimal switch')
+verify(reportPage.contains('data-minimal-title="' + minimal.title(product, 'APL') + '"'), 'the switch knows the minimal title')
+verify(reportPage.contains('data-full-title="' + cx.title('APL') + '"'), 'and the full title to switch back to')
+verify(reportPage.contains('function readMinimal(query)') && reportPage.contains("&report=minimal&format=json"), 'the minimal row is read from the GET of this endpoint')
+verify(reportPage.contains("body.mode = 'minimal'"), 'the write is posted in minimal mode')
+
 println 'MINIMAL ' + product + ': ' + checks + ' checks passed'

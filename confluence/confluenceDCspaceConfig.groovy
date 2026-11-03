@@ -263,7 +263,7 @@ class Pc {
     /* The single place the report version lives. The file header points here and
      * every output channel prints this constant, so a report always names the
      * build that produced it. */
-    static final String VERSION = "0.6"
+    static final String VERSION = "0.6.1"
 
     /* Node states. A node is not just present or absent: it can be present but
      * unreadable, and the report has to keep those apart.
@@ -3091,7 +3091,14 @@ window.addEventListener('beforeunload', function (event) {
         model.put("options", options)
         String payload = Pc.html(JsonOutput.toJson(model))
         String defaultTitle = Pc.html(Cx.title(report.spaceKey))
-        String actions = """            <div class="export-grid">
+        String minimalTitle = Pc.html(MinimalReport.title("confluence", report.spaceKey))
+        String actions = """            <label class="export-note"><input id="exportMinimal" type="checkbox"
+                data-full-title="${defaultTitle}" data-minimal-title="${minimalTitle}" onchange="exportModeChanged()">
+                <strong>Minimal report</strong>: write a one-row page with key, name, description, category, administrators, page count, used apps and
+                app and user macros instead, plus its row in a separate summary table on the parent. Topic columns on
+                that page are kept. The macro usage scan can take up to two minutes.
+            </label>
+            <div class="export-grid">
                 <label class="export-field">Page title
                     <input id="exportTitle" class="wide" type="text" value="${defaultTitle}">
                 </label>
@@ -3497,6 +3504,22 @@ function setView(name) {
    Three stages, not four: this endpoint writes into its own instance, so there is
    no target to pick and no request ever leaves this Confluence. */
 """ + exportStageScript() + """/* Stage 4 of the interaction, stage 3 of the endpoint: the write. */
+/* The minimal report: another page, under another title, fed from GET ?report=minimal. */
+function exportMinimalOn() { var box = el('exportMinimal'); return !!(box && box.checked); }
+function exportModeChanged() {
+    var box = el('exportMinimal');
+    var title = el('exportTitle');
+    var from = box.getAttribute(box.checked ? 'data-full-title' : 'data-minimal-title');
+    var to = box.getAttribute(box.checked ? 'data-minimal-title' : 'data-full-title');
+    if (title.value.trim() === '' || title.value.trim() === from) { title.value = to; }
+}
+function readMinimal(query) {
+    return fetch(window.location.pathname + '?' + query + '&report=minimal&format=json',
+            { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (response) {
+        if (!response.ok) { throw new Error('the minimal report could not be read (HTTP ' + response.status + ')'); }
+        return response.json();
+    });
+}
 function exportToPage() {
     var button = el('exportRun');
     function fail(text) { say('bad', text); }
@@ -3513,8 +3536,18 @@ function exportToPage() {
     if (!payload.spaceKey) { fail('Select a space first.'); return; }
     if (!payload.title) { fail('Enter a page title first.'); return; }
     button.disabled = true;
-    say('muted', 'Writing page...');
-    exportPost(payload).then(function (result) {
+    var minimal = exportMinimalOn();
+    if (minimal) { say('muted', 'Reading the minimal report (the macro usage scan can take up to two minutes)...'); }
+    var read = minimal ? readMinimal('space=' + encodeURIComponent(payload.space.key)) : Promise.resolve(payload);
+    read.then(function (body) {
+        if (minimal) {
+            var fields = ['spaceKey', 'parentPageId', 'parentTitle', 'title'];
+            for (var i = 0; i < fields.length; i++) { body[fields[i]] = payload[fields[i]]; }
+            body.mode = 'minimal';
+        }
+        say('muted', 'Writing page...');
+        return exportPost(body);
+    }).then(function (result) {
         button.disabled = false;
         var body = result.body || {};
         if (!result.ok || body.ok !== true) {
@@ -3558,14 +3591,16 @@ function exportToPage() {
         var logText = '';
         if (exportLog.state === 'recorded') {
             el('exportLastLine').textContent = 'Last export: ' + exportLog.detail;
-        } else {
+        } else if (exportLog.state !== 'skipped') {
             if (tone === 'good') { tone = 'warn'; }
             logText = ' EXPORT LOG NOT UPDATED. ' + (exportLog.reason || 'The server did not report it.');
         }
         var status = say(tone, 'Page ' + body.action + ': "' + body.title + '" in ' + body.spaceKey +
-            ' (version ' + body.pageVersion + '). Remark read: ' + body.remarkRead +
-            ', carried over: ' + body.remarksCarried + ' of ' + body.remarksRead +
-            ', without a matching item: ' + body.orphanedRemarks + '.' + parent + overviewText + logText);
+            ' (version ' + body.pageVersion + ').' + (body.mode === 'minimal'
+                ? ' Minimal report, topics: ' + ((body.topics || []).join(', ') || 'none') + '.'
+                : ' Remark read: ' + body.remarkRead +
+                  ', carried over: ' + body.remarksCarried + ' of ' + body.remarksRead +
+                  ', without a matching item: ' + body.orphanedRemarks + '.') + parent + overviewText + logText);
         if (body.pageUrl) {
             var link = document.createElement('a');
             link.href = body.pageUrl;

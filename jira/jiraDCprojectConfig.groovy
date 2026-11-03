@@ -191,7 +191,7 @@ class Pc {
     /* The single place the report version lives. The file header points here and
      * every output channel prints this constant, so a report always names the
      * build that produced it. */
-    static final String VERSION = "0.6"
+    static final String VERSION = "0.6.1"
 
     /* Node states. A node is not just present or absent: it can be present but
      * unreadable, and the report has to keep those apart. */
@@ -2571,7 +2571,13 @@ window.addEventListener('beforeunload', function (event) {
         String payload = Pc.html(JsonOutput.toJson(report.toMap()))
         String lastLine = Pc.html(lastExportLine(report))
         String defaultTitle = Pc.html(Cx.title(report.projectKey))
-        String actions = """            <div class="export-grid">
+        String minimalTitle = Pc.html(MinimalReport.title("jira", report.projectKey))
+        String actions = """            <label class="export-note"><input id="exportMinimal" type="checkbox"
+                data-full-title="${defaultTitle}" data-minimal-title="${minimalTitle}" onchange="exportModeChanged()">
+                <strong>Minimal report</strong>: write a one-row page with key, name, lead, administrators, category, issue count and latest issue update
+                instead, plus its row in a separate summary table on the parent. Topic columns on that page are kept.
+            </label>
+            <div class="export-grid">
                 <label class="export-field">Page title
                     <input id="exportTitle" class="wide" type="text" value="${defaultTitle}">
                 </label>
@@ -2946,6 +2952,22 @@ function setView(name) {
 }
 
 """ + exportStageScript() + """/* Stage 4. The write. */
+/* The minimal report: another page, under another title, fed from GET ?report=minimal. */
+function exportMinimalOn() { var box = el('exportMinimal'); return !!(box && box.checked); }
+function exportModeChanged() {
+    var box = el('exportMinimal');
+    var title = el('exportTitle');
+    var from = box.getAttribute(box.checked ? 'data-full-title' : 'data-minimal-title');
+    var to = box.getAttribute(box.checked ? 'data-minimal-title' : 'data-full-title');
+    if (title.value.trim() === '' || title.value.trim() === from) { title.value = to; }
+}
+function readMinimal(query) {
+    return fetch(window.location.pathname + '?' + query + '&report=minimal&format=json',
+            { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (response) {
+        if (!response.ok) { throw new Error('the minimal report could not be read (HTTP ' + response.status + ')'); }
+        return response.json();
+    });
+}
 function exportToConfluence() {
     var button = el('exportRun');
     function fail(text) { say('bad', text); }
@@ -2964,8 +2986,18 @@ function exportToConfluence() {
     if (!payload.spaceKey) { fail('Select a space first.'); return; }
     if (!payload.title) { fail('Enter a page title first.'); return; }
     button.disabled = true;
-    say('muted', 'Writing page...');
-    exportPost(payload).then(function (result) {
+    var minimal = exportMinimalOn();
+    if (minimal) { say('muted', 'Reading the minimal report...'); }
+    var read = minimal ? readMinimal('project=' + encodeURIComponent(payload.project.key)) : Promise.resolve(payload);
+    read.then(function (body) {
+        if (minimal) {
+            var fields = ['applicationLinkId', 'spaceKey', 'parentPageId', 'parentTitle', 'title'];
+            for (var i = 0; i < fields.length; i++) { body[fields[i]] = payload[fields[i]]; }
+            body.mode = 'minimal';
+        }
+        say('muted', 'Writing page...');
+        return exportPost(body);
+    }).then(function (result) {
         button.disabled = false;
         var body = result.body || {};
         if (!result.ok || body.ok !== true) {
@@ -3010,14 +3042,16 @@ function exportToConfluence() {
         var logText = '';
         if (exportLog.state === 'recorded') {
             el('exportLastLine').textContent = 'Last export: ' + exportLog.detail;
-        } else {
+        } else if (exportLog.state !== 'skipped') {
             if (tone === 'good') { tone = 'warn'; }
             logText = ' EXPORT LOG NOT UPDATED. ' + (exportLog.reason || 'The server did not report it.');
         }
         var status = say(tone, 'Page ' + body.action + ': "' + body.title + '" in ' + body.spaceKey +
-            ' (version ' + version + '). Remark read: ' + body.remarkRead +
-            ', carried over: ' + body.remarksCarried + ' of ' + body.remarksRead +
-            ', without a matching item: ' + body.orphanedRemarks + '.' + parent + overviewText + logText);
+            ' (version ' + version + ').' + (body.mode === 'minimal'
+                ? ' Minimal report, topics: ' + ((body.topics || []).join(', ') || 'none') + '.'
+                : ' Remark read: ' + body.remarkRead +
+                  ', carried over: ' + body.remarksCarried + ' of ' + body.remarksRead +
+                  ', without a matching item: ' + body.orphanedRemarks + '.') + parent + overviewText + logText);
         if (body.pageUrl) {
             var link = document.createElement('a');
             link.href = body.pageUrl;

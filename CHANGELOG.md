@@ -4,6 +4,15 @@ All notable changes to this project are documented here. Each endpoint carries i
 version, declared once in its helper class and printed by every output channel, so the
 sections below are grouped by endpoint rather than by a single repository version.
 
+## confluenceDCspaceConfig 0.6.1 and jiraDCprojectConfig 0.6.1
+
+### Added
+
+- The export form on a project's or space's report page has the **Minimal report** switch as well.
+  Ticked, it reads that object's `report=minimal` row, posts it in minimal mode and switches the
+  page title to `Jira project overview - KEY` or `Confluence space overview - KEY`; unticked, the
+  full export works as before. The result line names the topics of the written page.
+
 ## confluenceDCspaceConfig 0.6 and jiraDCprojectConfig 0.6
 
 ### Added

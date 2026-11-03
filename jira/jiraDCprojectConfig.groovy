@@ -8675,34 +8675,38 @@ Map<String, Object> minimalRead(Closure body) {
 }
 
 Map<String, Object> minimalLastUpdate(String projectKey, Map<String, Object> context) {
-    def search = context.get("searchService")
-    def user = context.get("user")
+    /* Every platform call below goes through the invoker: the editor's static type check
+     * resolves nothing on an Object, and these are the calls this file could not verify. */
+    Object search = context.get("searchService")
+    Object user = context.get("user")
     if (search == null) {
         return [state: "failed", note: "SearchService is not available in this instance."] as Map<String, Object>
     }
-    def parsed = search.parseQuery(user, "project = \"" + projectKey.replace("\"", "") + "\" ORDER BY updated DESC")
-    if (!parsed.valid) {
+    String jql = "project = \"" + projectKey.replace("\"", "") + "\" ORDER BY updated DESC"
+    Object parsed = InvokerHelper.invokeMethod(search, "parseQuery", [user, jql] as Object[])
+    if (InvokerHelper.getProperty(parsed, "valid") != Boolean.TRUE) {
         return [state: "failed", note: "The search for the latest update could not be parsed."] as Map<String, Object>
     }
-    def results = null
+    Object query = InvokerHelper.getProperty(parsed, "query")
+    Object results
     boolean complete = true
     try {
-        results = search.searchOverrideSecurity(user, parsed.query, new PagerFilter(1))
+        results = InvokerHelper.invokeMethod(search, "searchOverrideSecurity", [user, query, new PagerFilter(1)] as Object[])
     } catch (MissingMethodException ignored) {
-        results = search.search(user, parsed.query, new PagerFilter(1))
+        results = InvokerHelper.invokeMethod(search, "search", [user, query, new PagerFilter(1)] as Object[])
         complete = false
     }
     /* getResults since Jira 8, getIssues before. */
-    def found
+    Object found
     try {
-        found = results.getResults()
+        found = InvokerHelper.invokeMethod(results, "getResults", new Object[0])
     } catch (MissingMethodException ignored) {
-        found = results.getIssues()
+        found = InvokerHelper.invokeMethod(results, "getIssues", new Object[0])
     }
-    if (found == null || found.isEmpty()) {
+    if (!(found instanceof List) || ((List) found).isEmpty()) {
         return [state: "absent"] as Map<String, Object>
     }
-    Object updated = found.get(0).getUpdated()
+    Object updated = InvokerHelper.invokeMethod(((List) found).get(0), "getUpdated", new Object[0])
     if (!(updated instanceof Date)) {
         return [state: "absent"] as Map<String, Object>
     }

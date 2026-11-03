@@ -9383,7 +9383,7 @@ spaceConfig(
         try {
             Object keyFactory = Db.factory().get("factory")
             if (keyFactory != null) {
-                minimalExisting = (Set<String>) Db.withConnection(keyFactory, { connection ->
+                minimalExisting = (Set<String>) Db.withConnection(keyFactory, { java.sql.Connection connection ->
                     MinimalScan.existingKeys(connection) })
             }
         } catch (Throwable ignored) {

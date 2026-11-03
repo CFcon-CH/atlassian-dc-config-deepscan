@@ -37,7 +37,8 @@ if (product == 'jira') {
     verify(page.contains('Draw.io, Gliffy'), 'used apps are listed')
 }
 verify(first.sections.every { it.key != minimal.COLUMN + 'name' }, 'the name is the overview identity column, not a value column')
-verify(first.topics == [], 'no topic is invented')
+verify(first.topics == ['Themengebiet 1', 'Themengebiet 2'], 'a page starts with the default topics while none is known')
+verify(page.contains('<th>Themengebiet 1</th><th>Themengebiet 2</th></tr>'), 'the default topics are columns on the page')
 verify(minimal.title(product, 'APL') == (product == 'jira' ? 'Jira project overview - APL' : 'Confluence space overview - APL'),
     'the default title differs from the full export title')
 verify(minimal.cell(product, base, 'lead', [state: 'failed', note: 'NPE']) == '<em>unreadable: NPE</em>', 'a failed read is stated, never empty')
@@ -46,12 +47,12 @@ verify(minimal.cell(product, base, 'key', [value: 'A B']).contains('A%20B'), 'th
 
 /* ---- Reading an own page back ----------------------------------------------- */
 Map read = minimal.parse(page, product)
-verify(read.ok == true && read.topics.isEmpty(), 'an own page without topics reads back')
+verify(read.ok == true && read.topics == ['Themengebiet 1': '', 'Themengebiet 2': ''], 'an own page reads back with its empty default topics')
 
 /* An administrator adds two topic columns in the editor: the editor stamps macro ids and wraps cells. */
 String lozenge = '<ac:structured-macro ac:name="status" ac:schema-version="1" ac:macro-id="m-1"><ac:parameter ac:name="colour">Green</ac:parameter><ac:parameter ac:name="title">KI</ac:parameter></ac:structured-macro>'
-String edited = page.replace('</th></tr>', '</th><th><p><strong>Themengebiet 1</strong></p></th><th>Themengebiet 2</th><th><br/></th></tr>')
-    .replace('</td></tr>', '</td><td><p>' + lozenge + ' Governance</p></td><td><p><br/></p></td><td></td></tr>')
+String edited = page.replace('<th>Themengebiet 1</th><th>Themengebiet 2</th></tr>', '<th><p><strong>Themengebiet 1</strong></p></th><th>Themengebiet 2</th><th><br/></th></tr>')
+    .replace('<td></td><td></td></tr>', '<td><p>' + lozenge + ' Governance</p></td><td><p><br/></p></td><td></td></tr>')
 read = minimal.parse(edited, product)
 verify(read.ok == true, 'an edited page reads back: ' + read.reason)
 verify(read.topics.keySet() as List == ['Themengebiet 1', 'Themengebiet 2'], 'topics are read in page order, an empty unnamed column is dropped')

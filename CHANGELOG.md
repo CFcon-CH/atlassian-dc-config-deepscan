@@ -23,6 +23,8 @@ sections below are grouped by endpoint rather than by a single repository versio
   verbatim on the next export, fail-closed like the Remark carry-over. A topic found on one page
   joins the summary and is seeded, empty, onto every page exported afterwards, so all pages
   carry one topic set. The summary shows each page's topics and is rewritten from the pages.
+  While no topic is known yet, every page and the summary start with **Themengebiet 1** and
+  **Themengebiet 2**.
 - Summary rows of projects or spaces that no longer exist are kept and marked
   `NO LONGER EXISTS`, given a complete key list; archived Jira projects count as existing.
 - Confluence's macro columns use the macro usage scan of `confluenceDCappFootprint`, built in and

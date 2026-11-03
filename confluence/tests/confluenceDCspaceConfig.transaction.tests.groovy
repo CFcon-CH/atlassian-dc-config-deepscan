@@ -233,24 +233,25 @@ Page alphaPage = minimalStore.pages[minimalFirst.pageId as long]
 assert alphaPage.body.contains(MinimalReport.CONFLUENCE_MARKER) && !alphaPage.body.contains(Cx.MARKER)
 String summaryProduct = MinimalReport.overviewProduct('confluence')
 assert ConfigOverview.read(minimalStore.byId(minimalFirst.parentPageId as long).body, summaryProduct, 'DOC').rows.size() == 1
-alphaPage.body = alphaPage.body.replace('</th></tr>', '</th><th>Themengebiet 1</th></tr>').replace('</td></tr>', '</td><td>KI-Governance</td></tr>')
+assert alphaPage.body.contains('<th>Themengebiet 1</th><th>Themengebiet 2</th></tr>') : 'the first page starts with the default topics'
+alphaPage.body = alphaPage.body.replace('<td></td><td></td></tr>', '<td>KI-Governance</td><td></td></tr>')
 minimalStore.nextRequest()
 Map alphaAgain = minimalPayload('ALPHA', 'Alpha')
 alphaAgain.parentPageId = minimalFirst.parentPageId
 alphaAgain.parentTitle = ''
 alphaAgain.minimal.pages = [value: '13']
 Map minimalSecond = handler.export(alphaAgain)
-assert minimalSecond.ok && minimalSecond.action == 'updated' && minimalSecond.topics == ['Themengebiet 1'] : minimalSecond
+assert minimalSecond.ok && minimalSecond.action == 'updated' && minimalSecond.topics == ['Themengebiet 1', 'Themengebiet 2'] : minimalSecond
 assert minimalStore.byId(minimalFirst.pageId as long).body.contains('KI-Governance') : 'the topic survives the next export'
 assert minimalStore.byId(minimalFirst.pageId as long).body.contains('>13<') : 'generated values are rewritten'
 String summary = minimalStore.byId(minimalFirst.parentPageId as long).body
-assert summary.contains('KI-Governance') && MinimalReport.knownTopics(summary, 'confluence', 'DOC') == ['Themengebiet 1']
+assert summary.contains('KI-Governance') && MinimalReport.knownTopics(summary, 'confluence', 'DOC') == ['Themengebiet 1', 'Themengebiet 2']
 minimalStore.nextRequest()
 Map beta = minimalPayload('BETA', 'Beta')
 beta.parentPageId = minimalFirst.parentPageId
 beta.parentTitle = ''
 Map minimalBeta = handler.export(beta)
-assert minimalBeta.ok && minimalBeta.topics == ['Themengebiet 1'] : minimalBeta
+assert minimalBeta.ok && minimalBeta.topics == ['Themengebiet 1', 'Themengebiet 2'] : minimalBeta
 assert minimalStore.byId(minimalBeta.pageId as long).body.contains('<th>Themengebiet 1</th>') : 'a new page is seeded with the topic set'
 assert ConfigOverview.read(minimalStore.byId(minimalFirst.parentPageId as long).body, summaryProduct, 'DOC').rows.size() == 2
 minimalStore.pages[minimalFirst.pageId as long].body = minimalStore.pages[minimalFirst.pageId as long].body.replace(MinimalReport.CONFLUENCE_MARKER, 'x')

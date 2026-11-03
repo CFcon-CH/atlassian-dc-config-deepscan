@@ -26,7 +26,7 @@ The read before a write is fail-closed, following the existing Remark carry-over
 
 ## One topic set
 
-All object pages carry the same topic columns. The overview holds the known set. When an export finds a topic column on its page that the overview does not know yet, the column is added to the overview. Every exported page is seeded with every known topic column it lacks, with an empty cell. Matching is by header text, compared after `Cx.plainText` and case-insensitively. A renamed topic header is a new topic; the old overview column keeps its earlier values until those pages are exported again.
+All object pages carry the same topic columns. The overview holds the known set. While no topic is known yet, the set is **Themengebiet 1** and **Themengebiet 2**, as in the requirement screenshots. When an export finds a topic column on its page that the overview does not know yet, the column is added to the overview. Every exported page is seeded with every known topic column it lacks, with an empty cell. Matching is by header text, compared after `Cx.plainText` and case-insensitively. A renamed topic header is a new topic; the old overview column keeps its earlier values until those pages are exported again.
 
 ## Overview
 

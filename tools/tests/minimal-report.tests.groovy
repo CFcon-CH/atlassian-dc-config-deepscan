@@ -135,4 +135,68 @@ verify(minimal.markGone(two, product, 'DOC', null) == two, 'without a complete k
 verify(minimal.markGone(marked.replace('<ac:structured-macro ', '<ac:structured-macro ac:macro-id="y" '), product, 'DOC', ['APL', 'OLD'] as Set)
     .indexOf(minimal.GONE) < 0, 'an editor-stamped mark is still recognised')
 
+/* ---- Jira collectors, against stubs of the platform types they name ---------- */
+if (product == 'jira') {
+    File repo = new File(System.getProperty('repoRoot', '.'))
+    String source = new File(repo, 'jira/jiraDCprojectConfig.groovy').getText('UTF-8')
+    String functions = source.substring(source.indexOf('Map<String, Object> minimalRead(Closure body) {'),
+        source.indexOf('String minimalCsv(String product'))
+    def collectors = new GroovyShell(getClass().classLoader).evaluate("""
+import org.codehaus.groovy.runtime.InvokerHelper
+class ApplicationUser { String displayName; String getDisplayName() { displayName } }
+class ProjectCategory { String name; String getName() { name } }
+class Project {
+    String key; String name; Long id; ApplicationUser lead; ProjectCategory category
+    String getKey() { key }; String getName() { name }; Long getId() { id }
+    ApplicationUser getProjectLead() { lead }; ProjectCategory getProjectCategoryObject() { category }
+}
+class ProjectRole {}
+class RoleActor { String descriptor; String getDescriptor() { descriptor } }
+class ProjectRoleActors { Set<RoleActor> actors; Set<RoleActor> getRoleActors() { actors } }
+class ProjectRoleManager { Set<RoleActor> actors; ProjectRoleActors getProjectRoleActors(ProjectRole role, Project project) { new ProjectRoleActors(actors: actors) } }
+class ProjectManager { List<Project> active; List<Project> archived; List<Project> getProjectObjects() { active }; List<Project> getArchivedProjects() { archived } }
+class PagerFilter { int max; PagerFilter(int max) { this.max = max } }
+""" + functions + '\nreturn this')
+    Class loader = collectors.class
+    def type = { String name -> collectors.class.classLoader.loadClass(name) }
+    def user = type('ApplicationUser').newInstance(displayName: 'Pius Höltschi')
+    def project = type('Project').newInstance(key: 'APL', name: 'ART Plattform', id: 10L, lead: user,
+        category: type('ProjectCategory').newInstance(name: 'SWEP-Streams'))
+    def actors = [type('RoleActor').newInstance(descriptor: 'jira-admins'), type('RoleActor').newInstance(descriptor: 'Daniel Tobler')] as Set
+    def issue = new Expando(getUpdated: { -> new java.sql.Timestamp(Date.parse('yyyy-MM-dd', '2026-10-30').time) })
+    def jql = []
+    def search = new Expando(parseQuery: { u, String q -> jql << q; [valid: true, query: 'Q'] },
+        searchOverrideSecurity: { u, q, pager -> assert pager.max == 1; new Expando(getResults: { -> [issue] }) })
+    Map context = [roleManager: type('ProjectRoleManager').newInstance(actors: actors), adminRole: type('ProjectRole').newInstance(),
+                   roleProblem: null, issueManager: new Expando(getIssueCountForProject: { Long id -> id == 10L ? 7226L : -1L }),
+                   searchService: search, user: user]
+    Map row = collectors.minimalRow(project, context)
+    verify(row.key.value == 'APL' && row.name.value == 'ART Plattform', 'key and name are read')
+    verify(row.lead.value == 'Pius Höltschi', 'the lead is read by display name')
+    verify(row.admins.value == ['Daniel Tobler', 'jira-admins'], 'role actors are users and groups, sorted, not expanded')
+    verify(row.category.value == 'SWEP-Streams', 'the category is read')
+    verify(row.issues.value == '7226', 'the issue count comes from the IssueManager call')
+    verify(row.lastUpdate.value == '30.10.2026' && row.lastUpdate.state == null, 'the latest update is one search, formatted as in the requirement')
+    verify(jql == ['project = "APL" ORDER BY updated DESC'], 'the search names the project and sorts by update')
+    search.searchOverrideSecurity = { u, q, pager -> throw new MissingMethodException('searchOverrideSecurity', Object, [] as Object[]) }
+    search.search = { u, q, pager -> new Expando(getResults: { -> [issue] }) }
+    verify(collectors.minimalLastUpdate('APL', context).state == 'partial', 'a search under the administrator\'s security is a lower bound')
+    search.search = { u, q, pager -> new Expando(getResults: { -> [] }) }
+    verify(collectors.minimalLastUpdate('APL', context).state == 'absent', 'a project without issues has no latest update')
+    context.searchService = null
+    verify(collectors.minimalRow(project, context).lastUpdate.state == 'failed', 'a missing search service is unreadable, not empty')
+    context.adminRole = null; context.roleProblem = 'This instance has no project role named Administrators.'
+    context.issueManager = new Expando(getIssueCountForProject: { Long id -> throw new IllegalStateException('db down') })
+    Map failed = collectors.minimalRow(project, context)
+    verify(failed.admins.state == 'failed' && failed.admins.note.contains('Administrators'), 'a missing Administrators role is stated')
+    verify(failed.issues.state == 'failed' && failed.issues.note.contains('db down'), 'a failed count is unreadable, never zero')
+    project.lead = null; project.category = null
+    Map empty = collectors.minimalRow(project, context)
+    verify(empty.lead.state == 'absent' && empty.category.state == 'absent', 'an unset lead or category is empty, not failed')
+    def projects = type('ProjectManager').newInstance(active: [project], archived: [type('Project').newInstance(key: 'ARC')])
+    verify(collectors.minimalExistingKeys(projects) == ['APL', 'ARC'] as Set, 'archived projects count as existing')
+    verify(collectors.minimalExistingKeys(type('ProjectManager').newInstance(active: [project], archived: null)) == null,
+        'an incomplete project list marks nothing')
+}
+
 println 'MINIMAL ' + product + ': ' + checks + ' checks passed'

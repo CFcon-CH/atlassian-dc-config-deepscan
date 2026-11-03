@@ -82,6 +82,7 @@ import com.atlassian.jira.entity.property.EntityPropertyType
 import com.atlassian.jira.entity.property.JsonEntityPropertyManager
 import com.atlassian.jira.event.type.EventType
 import com.atlassian.jira.event.type.EventTypeManager
+import com.atlassian.jira.bc.issue.search.SearchService
 import com.atlassian.jira.issue.CustomFieldManager
 import com.atlassian.jira.issue.RendererManager
 import com.atlassian.jira.issue.customfields.CustomFieldType
@@ -141,6 +142,7 @@ import com.atlassian.jira.util.BuildUtilsInfo
 import com.atlassian.jira.util.I18nHelper
 import com.atlassian.jira.util.Page
 import com.atlassian.jira.util.PageRequests
+import com.atlassian.jira.web.bean.PagerFilter
 import com.atlassian.plugin.Plugin
 import com.atlassian.jira.workflow.AssignableWorkflowScheme
 import com.atlassian.jira.workflow.DraftWorkflowScheme
@@ -2100,6 +2102,7 @@ class Render {
         out.append("<div class=\"project-row").append(logLabel == null ? "" : " is-logged")
         out.append("\" data-key=\"").append(Pc.html(key))
         out.append("\" data-title=\"").append(Pc.html(Cx.title(key)))
+        out.append("\" data-minimal-title=\"").append(Pc.html(MinimalReport.title("jira", key)))
         out.append("\" data-find=\"").append(Pc.html((key + " " + name).toLowerCase(Locale.ROOT))).append("\">")
         out.append("<input type=\"checkbox\" class=\"bulk-pick\" onchange=\"selectionChanged()\" aria-label=\"Select ")
         out.append(Pc.html(key)).append("\">")
@@ -2139,6 +2142,13 @@ class Render {
                 after the other, never in parallel, because every export updates the same overview table.
                 Keep this tab open until the run has finished.
             </div>
+            <label class="export-note"><input id="bulkMinimal" type="checkbox" onchange="exportTargetChanged()">
+                <strong>Minimal report</strong>: write a one-row page per project instead, titled
+                <strong>${Pc.html(MinimalReport.title("jira", "KEY"))}</strong>, with key, name, lead, administrators,
+                category, issue count and latest issue update. Columns added on such a page are topics: they are kept
+                on every later export, added to every other page and shown in a separate summary table on the
+                overview page.
+            </label>
             <div class="export-grid">
                 <button id="bulkRun" class="button" type="button" disabled onclick="startBulk()">Export selected (0)</button>
                 <button id="bulkStop" class="button hidden" type="button" onclick="stopBulk()">Stop after the current project</button>
@@ -2254,10 +2264,13 @@ function selectedItems() {
     var items = [];
     for (var i = 0; i < rows.length; i++) {
         if (!rows[i].querySelector('.bulk-pick').checked) { continue; }
-        items.push({ key: rows[i].getAttribute('data-key'), title: rows[i].getAttribute('data-title'), row: rows[i] });
+        items.push({ key: rows[i].getAttribute('data-key'), title: rowTitle(rows[i]), row: rows[i] });
     }
     return items;
 }
+/* The minimal report writes other pages, under other titles, into its own summary table. */
+function minimalOn() { var box = el('bulkMinimal'); return !!(box && box.checked); }
+function rowTitle(row) { return row.getAttribute(minimalOn() ? 'data-minimal-title' : 'data-title'); }
 function selectionChanged() {
     var count = selectedItems().length;
     el('bulkCount').textContent = count + ' selected';
@@ -2286,7 +2299,7 @@ function exportTargetChanged() {
 function loadExported(parentId, spaceKey) {
     var seq = exportedSeq;
     el('exportedNote').textContent = 'Reading the overview on page ' + parentId + '...';
-    exportPost({ action: 'exported', applicationLinkId: el('exportTarget').value, spaceKey: spaceKey, parentPageId: parentId }).then(function (result) {
+    exportPost({ action: 'exported', mode: minimalOn() ? 'minimal' : 'full', applicationLinkId: el('exportTarget').value, spaceKey: spaceKey, parentPageId: parentId }).then(function (result) {
         if (seq !== exportedSeq) { return; }
         var body = result.body || {};
         if (!result.ok || body.ok !== true) {
@@ -2310,7 +2323,7 @@ function paintExported() {
     var rows = bulkRows();
     var marked = 0;
     for (var i = 0; i < rows.length; i++) {
-        var hit = exportedTitles[titleKey(spaceKey, rows[i].getAttribute('data-title'))] === true;
+        var hit = exportedTitles[titleKey(spaceKey, rowTitle(rows[i]))] === true;
         if (hit) { marked++; }
         markRow(rows[i], hit);
     }
@@ -2378,7 +2391,9 @@ function runBulk(items) {
    that could not be read means nothing was sent; a write request that failed in
    transit means the page may or may not have changed, and it says so. */
 function exportOne(item) {
-    var reportUrl = window.location.pathname + '?project=' + encodeURIComponent(item.key) + '&format=json';
+    var minimal = minimalOn();
+    var reportUrl = window.location.pathname + '?project=' + encodeURIComponent(item.key) + '&format=json' +
+        (minimal ? '&report=minimal' : '');
     return fetch(reportUrl, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (response) {
         if (!response.ok) { throw new Error('HTTP ' + response.status); }
         return response.json();
@@ -2388,6 +2403,7 @@ function exportOne(item) {
         payload.parentPageId = el('exportParent').value.trim();
         payload.parentTitle = payload.parentPageId ? '' : el('exportParentQuery').value.trim();
         payload.title = item.title;
+        if (minimal) { payload.mode = 'minimal'; }
         return exportPost(payload).then(function (result) {
             return writeOutcome(item, result);
         }, function (error) {
@@ -2413,7 +2429,7 @@ function writeOutcome(item, result) {
     var exportLog = body.exportLog || {};
     if (exportLog.state === 'recorded') {
         markLogged(item.row, exportLog.label, exportLog.detail);
-    } else {
+    } else if (exportLog.state !== 'skipped') {
         notes.push('EXPORT LOG NOT UPDATED. ' + (exportLog.reason || 'The server did not report it.'));
     }
     var overview = body.overview || { state: 'skipped' };
@@ -2509,6 +2525,7 @@ function retryBulk() {
 function lockTarget(locked) {
     var ids = ['exportTarget', 'exportSpaceQuery', 'exportParentQuery'];
     for (var i = 0; i < ids.length; i++) { el(ids[i]).disabled = locked; }
+    if (el('bulkMinimal')) { el('bulkMinimal').disabled = locked; }
     el('exportRebuild').disabled = locked || !el('exportParent').value;
     if (!locked) { return; }
     if (exportPageTimer) { window.clearTimeout(exportPageTimer); }
@@ -7789,6 +7806,12 @@ projectConfig(
 
     ProjectManager projectManager = ComponentAccessor.getProjectManager()
 
+    /* ---- Minimal report: its own representation, picker and full report untouched */
+
+    if (Pc.stringParam(queryParams, "report", "full").toLowerCase(Locale.ROOT) == "minimal") {
+        return minimalResponse(responseClass, report, projectManager, projectKey, format, started)
+    }
+
     /* ---- No project named: render the picker ------------------------------ */
 
     if (projectKey == null) {
@@ -8534,6 +8557,274 @@ Map<String, Object> confluenceSpaces(ApplicationLinkRequestFactory factory) {
     return result
 }
 
+/* ---- Minimal report ----------------------------------------------------------
+ *
+ * The reduced report: per project the columns of the requirement, for the
+ * one-row project page and the summary on the overview (see MinimalReport). It is
+ * the ONLY place in this endpoint that reads issue data, and it reads exactly two
+ * values: the issue count, through the IssueManager call jiraDCappFootprint uses,
+ * and the latest update, through one search with one result.
+ *
+ * NOT VERIFIED against the Jira Javadoc, which was not reachable when this was
+ * written: SearchService.searchOverrideSecurity and the SearchResults getter. Both
+ * are therefore called dynamically. A search that only runs with the security filter
+ * of the exporting administrator is reported as a lower bound (*), and a search that
+ * does not run at all as unreadable, never as a project without issues. */
+
+Map<String, Object> minimalContext() {
+    Map<String, Object> context = new LinkedHashMap<String, Object>()
+    ProjectRoleManager roleManager = null
+    try {
+        roleManager = ComponentAccessor.getComponent(ProjectRoleManager)
+    } catch (Throwable ignored) {
+        roleManager = null
+    }
+    ProjectRole adminRole = null
+    String roleProblem = null
+    if (roleManager == null) {
+        roleProblem = "ProjectRoleManager is not available in this instance."
+    } else {
+        try {
+            adminRole = roleManager.getProjectRole("Administrators")
+            if (adminRole == null) {
+                roleProblem = "This instance has no project role named Administrators."
+            }
+        } catch (Throwable error) {
+            roleProblem = "The project role Administrators could not be read: " + Cx.errorDetail(error)
+        }
+    }
+    context.put("roleManager", roleManager)
+    context.put("adminRole", adminRole)
+    context.put("roleProblem", roleProblem)
+    try {
+        context.put("issueManager", ComponentAccessor.getIssueManager())
+    } catch (Throwable ignored) {
+        context.put("issueManager", null)
+    }
+    try {
+        context.put("searchService", ComponentAccessor.getComponent(SearchService))
+    } catch (Throwable ignored) {
+        context.put("searchService", null)
+    }
+    context.put("user", ComponentAccessor.getJiraAuthenticationContext().getLoggedInUser())
+    return context
+}
+
+/* One value read on its own: a failure costs this one cell and says why. */
+Map<String, Object> minimalRead(Closure body) {
+    try {
+        return (Map<String, Object>) body.call()
+    } catch (Throwable error) {
+        return [state: "failed", note: Cx.errorDetail(error)] as Map<String, Object>
+    }
+}
+
+Map<String, Object> minimalLastUpdate(String projectKey, Map<String, Object> context) {
+    def search = context.get("searchService")
+    def user = context.get("user")
+    if (search == null) {
+        return [state: "failed", note: "SearchService is not available in this instance."] as Map<String, Object>
+    }
+    def parsed = search.parseQuery(user, "project = \"" + projectKey.replace("\"", "") + "\" ORDER BY updated DESC")
+    if (!parsed.valid) {
+        return [state: "failed", note: "The search for the latest update could not be parsed."] as Map<String, Object>
+    }
+    def results = null
+    boolean complete = true
+    try {
+        results = search.searchOverrideSecurity(user, parsed.query, new PagerFilter(1))
+    } catch (MissingMethodException ignored) {
+        results = search.search(user, parsed.query, new PagerFilter(1))
+        complete = false
+    }
+    /* getResults since Jira 8, getIssues before. */
+    def found
+    try {
+        found = results.getResults()
+    } catch (MissingMethodException ignored) {
+        found = results.getIssues()
+    }
+    if (found == null || found.isEmpty()) {
+        return [state: "absent"] as Map<String, Object>
+    }
+    Object updated = found.get(0).getUpdated()
+    if (!(updated instanceof Date)) {
+        return [state: "absent"] as Map<String, Object>
+    }
+    String text = new java.text.SimpleDateFormat("dd.MM.yyyy").format((Date) updated)
+    return complete
+        ? [value: text] as Map<String, Object>
+        : [value: text, state: "partial", note: "read with the issue security of the exporting administrator"] as Map<String, Object>
+}
+
+Map<String, Object> minimalRow(Project project, Map<String, Object> context) {
+    Map<String, Object> row = new LinkedHashMap<String, Object>()
+    row.put("key", [value: project.getKey()])
+    row.put("name", [value: project.getName()])
+    row.put("lead", minimalRead { ->
+        ApplicationUser lead = project.getProjectLead()
+        return lead == null ? [state: "absent"] : [value: lead.getDisplayName()]
+    })
+    row.put("admins", minimalRead { ->
+        ProjectRole role = (ProjectRole) context.get("adminRole")
+        if (role == null) {
+            return [state: "failed", note: String.valueOf(context.get("roleProblem"))]
+        }
+        ProjectRoleActors actors = ((ProjectRoleManager) context.get("roleManager")).getProjectRoleActors(role, project)
+        Set<RoleActor> roleActors = actors == null ? null : actors.getRoleActors()
+        List<String> names = new ArrayList<String>()
+        if (roleActors != null) {
+            for (RoleActor actor : roleActors) {
+                String name = Pc.text(actor.getDescriptor())
+                if (name != null && !names.contains(name)) {
+                    names.add(name)
+                }
+            }
+        }
+        names.sort(String.CASE_INSENSITIVE_ORDER)
+        return names.isEmpty() ? [state: "absent"] : [value: names]
+    })
+    row.put("category", minimalRead { ->
+        ProjectCategory category = project.getProjectCategoryObject()
+        return category == null ? [state: "absent"] : [value: category.getName()]
+    })
+    row.put("issues", minimalRead { ->
+        Object issueManager = context.get("issueManager")
+        if (issueManager == null) {
+            return [state: "failed", note: "IssueManager is not available in this instance."]
+        }
+        return [value: String.valueOf(InvokerHelper.invokeMethod(issueManager, "getIssueCountForProject", [project.getId()] as Object[]))]
+    })
+    row.put("lastUpdate", minimalRead { -> minimalLastUpdate(project.getKey(), context) })
+    return row
+}
+
+/* Every project key this instance holds, archived ones included, so a row is marked as
+ * no longer existing only for a project that is really gone. Null when either list could
+ * not be read: an incomplete list marks nothing. */
+Set<String> minimalExistingKeys(ProjectManager projectManager) {
+    try {
+        Set<String> keys = new HashSet<String>()
+        List<Project> active = projectManager.getProjectObjects()
+        List<Project> archived = projectManager.getArchivedProjects()
+        if (active == null || archived == null) {
+            return null
+        }
+        for (Project project : active) {
+            if (project != null && project.getKey() != null) {
+                keys.add(project.getKey())
+            }
+        }
+        for (Project project : archived) {
+            if (project != null && project.getKey() != null) {
+                keys.add(project.getKey())
+            }
+        }
+        return keys
+    } catch (Throwable ignored) {
+        return null
+    }
+}
+
+String minimalCsv(String product, List<Map<String, Object>> rows) {
+    StringBuilder out = new StringBuilder()
+    List<String> header = new ArrayList<String>()
+    for (List<String> column : MinimalReport.columns(product)) {
+        header.add(Pc.csv(column.get(1)))
+    }
+    out.append(header.join(";")).append("\n")
+    for (Map<String, Object> row : rows) {
+        Map<String, Object> values = Cx.sub(row, "minimal")
+        List<String> cells = new ArrayList<String>()
+        for (List<String> column : MinimalReport.columns(product)) {
+            cells.add(Pc.csv(Cx.plainText(MinimalReport.cell(product, null, column.get(0), values.get(column.get(0))))))
+        }
+        out.append(cells.join(";")).append("\n")
+    }
+    return out.toString()
+}
+
+String minimalHtml(String product, String baseUrl, String heading, String generatedAt, List<Map<String, Object>> rows) {
+    StringBuilder out = new StringBuilder()
+    out.append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n")
+    out.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
+    out.append("<title>").append(Pc.html(heading)).append("</title>\n<style>")
+    out.append("body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:24px;color:#172b4d}")
+    out.append("table{border-collapse:collapse}th,td{border:1px solid #dfe1e6;padding:6px 10px;text-align:left;vertical-align:top}")
+    out.append("th{background:#f4f5f7}em{color:#6b778c}</style>\n</head>\n<body>\n")
+    out.append("<h1>").append(Pc.html(heading)).append("</h1>\n<p>Generated ").append(Pc.html(generatedAt))
+    out.append(" by the minimal report v").append(Pc.html(Pc.VERSION)).append(". A value marked * is a lower bound.</p>\n")
+    out.append("<table><thead><tr>")
+    for (List<String> column : MinimalReport.columns(product)) {
+        out.append("<th>").append(Pc.html(column.get(1))).append("</th>")
+    }
+    out.append("</tr></thead><tbody>\n")
+    for (Map<String, Object> row : rows) {
+        Map<String, Object> values = Cx.sub(row, "minimal")
+        out.append("<tr>")
+        for (List<String> column : MinimalReport.columns(product)) {
+            out.append("<td>").append(MinimalReport.cell(product, baseUrl, column.get(0), values.get(column.get(0)))).append("</td>")
+        }
+        out.append("</tr>\n")
+    }
+    out.append("</tbody></table>\n</body>\n</html>\n")
+    return out.toString()
+}
+
+/* GET ?report=minimal. With project= one project, without it every project. A read;
+ * it never writes. The JSON of one project is the payload the bulk export posts. */
+Object minimalResponse(Class responseClass, Report report, ProjectManager projectManager, String projectKey,
+                       String format, long started) {
+    Map<String, Object> context = minimalContext()
+    List<Project> projects = new ArrayList<Project>()
+    try {
+        if (projectKey != null) {
+            Project project = projectManager.getProjectObjByKeyIgnoreCase(projectKey)
+            if (project == null) {
+                Map<String, Object> missing = [ok: false, error: "No project with key " + projectKey + " was found, or it could not be read."] as Map<String, Object>
+                return Http.build(responseClass, 404, JsonOutput.prettyPrint(JsonOutput.toJson(missing)), Http.JSON, null)
+            }
+            projects.add(project)
+        } else {
+            projects.addAll(projectManager.getProjectObjects())
+            projects.sort { Project left, Project right -> String.valueOf(left.getKey()).compareToIgnoreCase(String.valueOf(right.getKey())) }
+        }
+    } catch (Throwable error) {
+        Map<String, Object> failed = [ok: false, error: "The project list could not be read: " + Cx.errorDetail(error) +
+            ". This is a failed read, not an empty instance."] as Map<String, Object>
+        return Http.build(responseClass, 500, JsonOutput.prettyPrint(JsonOutput.toJson(failed)), Http.JSON, null)
+    }
+    List<Map<String, Object>> rows = new ArrayList<Map<String, Object>>()
+    for (Project project : projects) {
+        Map<String, Object> entry = new LinkedHashMap<String, Object>()
+        entry.put("project", [key: project.getKey(), name: project.getName()])
+        entry.put("minimal", minimalRow(project, context))
+        rows.add(entry)
+    }
+    String generatedAt = Pc.timestamp()
+    if (format == "csv") {
+        return Http.ok(responseClass, minimalCsv("jira", rows), Http.CSV)
+    }
+    if (format == "json") {
+        Map<String, Object> payload = new LinkedHashMap<String, Object>()
+        payload.put("ok", Boolean.TRUE)
+        payload.put("report", "minimal")
+        payload.put("product", "jira")
+        payload.put("reportVersion", Pc.VERSION)
+        payload.put("generatedAt", generatedAt)
+        payload.put("instance", [title: report.instanceTitle, baseUrl: report.instanceBaseUrl, jiraVersion: report.jiraVersion])
+        if (projectKey != null) {
+            payload.put("project", rows.get(0).get("project"))
+            payload.put("minimal", rows.get(0).get("minimal"))
+        } else {
+            payload.put("rows", rows)
+        }
+        payload.put("executionMs", Long.valueOf(System.currentTimeMillis() - started))
+        return Http.ok(responseClass, JsonOutput.prettyPrint(JsonOutput.toJson(payload)), Http.JSON)
+    }
+    return Http.ok(responseClass, minimalHtml("jira", report.instanceBaseUrl, "Jira projects, minimal report", generatedAt, rows), Http.HTML)
+}
+
 /* The export log store of this instance: SAL's PluginSettingsFactory, reached by
  * name and asked for its global settings. NOT YET MEASURED from a ScriptRunner
  * endpoint on Jira; ExportLog reports a store it cannot reach instead of failing.
@@ -9234,7 +9525,8 @@ projectConfig(
             }
             List<Map<String, String>> exportedRows
             try {
-                exportedRows = ConfigOverview.exported(String.valueOf(exportedPage.get("storage")), "jira", exportedPageSpace)
+                exportedRows = ConfigOverview.exported(String.valueOf(exportedPage.get("storage")),
+                    Cx.str(request, "mode", "full") == "minimal" ? MinimalReport.overviewProduct("jira") : "jira", exportedPageSpace)
             } catch (IllegalArgumentException refusal) {
                 return refuse(409, "exported", "The overview table on page " + exportedParent +
                     " cannot be read: " + refusal.getMessage())
@@ -9383,7 +9675,14 @@ projectConfig(
      * this report's own shape. It asked for "apps" until now, which is the shape of
      * the sibling app-footprint endpoint this transport was taken from: every
      * export refused with a sentence about apps that this report has never had. */
-    if (Cx.rowsOf(request, "sections").isEmpty()) {
+    /* mode "minimal" is the reduced report: its payload is the GET ?report=minimal JSON of
+     * one project, and it writes the one-row project page and the summary overview. */
+    boolean minimalMode = Cx.str(request, "mode", "full").toLowerCase(Locale.ROOT) == "minimal"
+    if (minimalMode && Cx.sub(request, "minimal").isEmpty()) {
+        return refuse(400, "validate", "The minimal export payload carries no values. " +
+            "Nothing is written. Reload the project list and press the button again.")
+    }
+    if (!minimalMode && Cx.rowsOf(request, "sections").isEmpty()) {
         return refuse(400, "validate", "The export payload carries no configuration sections. " +
             "Nothing is written. Reload the report and press the button again.")
     }
@@ -9455,13 +9754,25 @@ projectConfig(
 
     RemarkRead read = new RemarkRead()
     boolean pageExists = existing.get("found") == Boolean.TRUE
+    Map<String, String> pageTopics = new LinkedHashMap<String, String>()
 
     if (pageExists) {
         if (existing.get("storageRead") != Boolean.TRUE) {
             return refuse(409, "read", "A page with this title already exists in \"" + spaceKey + "\" but its body did " +
                 "not arrive over the application link. Nothing is written, so no remark can be lost.")
         }
-        read = Cx.parseRemarks(String.valueOf(existing.get("storage")))
+        if (minimalMode) {
+            /* The topics take the place of the remarks, with the same fail-closed gate. */
+            Map<String, Object> topicRead = MinimalReport.parse(String.valueOf(existing.get("storage")), "jira")
+            if (topicRead.get("ok") == Boolean.TRUE) {
+                read.outcome = RemarkRead.PARSED
+                pageTopics = (Map<String, String>) topicRead.get("topics")
+            } else {
+                read.fail(String.valueOf(topicRead.get("reason")))
+            }
+        } else {
+            read = Cx.parseRemarks(String.valueOf(existing.get("storage")))
+        }
         read.pageId = existing.get("id") == null ? null : existing.get("id").toString()
         read.pageVersion = ((Number) existing.get("version")).intValue()
     }
@@ -9504,7 +9815,48 @@ projectConfig(
 
     /* ---- Write ------------------------------------------------------------- */
 
-    ExportOutcome outcome = Cx.render(request, read)
+    ExportOutcome outcome
+    List<String> minimalTopics = new ArrayList<String>()
+    if (minimalMode) {
+        /* One topic set: the overview knows every topic an earlier export found, and this
+         * page is seeded with the ones it lacks. A summary that cannot be read seeds nothing
+         * and says so; the overview update below reports its own outcome. */
+        List<String> knownTopics = new ArrayList<String>()
+        String knownTopicsProblem = null
+        if (parentId != null) {
+            Map<String, Object> known = confluenceOverviewRead(factory, parentId)
+            try {
+                if (known.get("ok") == Boolean.TRUE) {
+                    knownTopics = MinimalReport.knownTopics(String.valueOf(known.get("storage")), "jira", spaceKey)
+                } else {
+                    throw new IllegalStateException(String.valueOf(known.get("error")))
+                }
+            } catch (Exception error) {
+                knownTopics = new ArrayList<String>()
+                knownTopicsProblem = "The topics of the overview could not be read (" + Cx.errorDetail(error) +
+                    "), so this page was not seeded with them."
+            }
+        }
+        String jiraBaseUrl = null
+        try {
+            jiraBaseUrl = ComponentAccessor.getApplicationProperties().getJiraBaseUrl()
+        } catch (Exception ignored) {
+            jiraBaseUrl = Cx.str(Cx.sub(request, "instance"), "baseUrl", null)
+        }
+        Map<String, Object> rendered = MinimalReport.render("jira", jiraBaseUrl, Cx.sub(request, "minimal"), pageTopics,
+            knownTopics, Pc.timestamp(), Pc.VERSION)
+        outcome = new ExportOutcome()
+        outcome.storage = (String) rendered.get("storage")
+        outcome.sections = (List<Map<String, String>>) rendered.get("sections")
+        minimalTopics = (List<String>) rendered.get("topics")
+        outcome.remarksRead = pageTopics.size()
+        outcome.remarksCarried = pageTopics.size()
+        if (knownTopicsProblem != null) {
+            outcome.warnings.add(knownTopicsProblem)
+        }
+    } else {
+        outcome = Cx.render(request, read)
+    }
 
     /* What this run does about the position. A parent named in this run is carried
      * out even when the report page already exists - that is the defect this fixes,
@@ -9547,17 +9899,27 @@ projectConfig(
 
     Map<String, Object> projectIdentity = Cx.sub(request, "project")
     String overviewLabel = Cx.str(projectIdentity, "name", Cx.str(projectIdentity, "key", title))
-    Map overview = OverviewExport.maintain("jira", parentId, pageId, title, spaceKey, overviewLabel,
-        outcome.sections,
+    /* The minimal export keeps its own summary table and marks the rows of projects this
+     * instance no longer holds. Without a complete key list nothing is marked. */
+    Set<String> existingKeys = minimalMode ? minimalExistingKeys(ComponentAccessor.getProjectManager()) : null
+    if (minimalMode && existingKeys == null) {
+        outcome.warnings.add("The project list could not be read completely, so no overview row was marked as no longer existing.")
+    }
+    Map overview = OverviewExport.maintain(minimalMode ? MinimalReport.overviewProduct("jira") : "jira", parentId, pageId, title,
+        spaceKey, overviewLabel, outcome.sections,
         { -> confluenceOverviewRead(factory, parentId) },
-        { Map page, String storage -> confluenceOverviewWrite(factory, page, storage) })
+        { Map page, String storage -> confluenceOverviewWrite(factory, page, storage) },
+        minimalMode ? { String merged -> MinimalReport.markGone(merged, "jira", spaceKey, existingKeys) } : null)
 
     /* The detail page is written, so the export goes into the log, whatever the
      * overview did. A log that cannot be written is reported with the export; it
      * never turns a written page into a failed export. */
     Map<String, Object> exportLog
     String loggedKey = Cx.str(projectIdentity, "key", "")
-    if (loggedKey.isEmpty()) {
+    if (minimalMode) {
+        /* The log marks full exports in the picker; a minimal page is not one. */
+        exportLog = [state: "skipped", reason: "The minimal report is not recorded in the export log."] as Map<String, Object>
+    } else if (loggedKey.isEmpty()) {
         exportLog = [state: "failed", reason: "The export named no project key, so it was not logged."] as Map<String, Object>
     } else {
         try {
@@ -9582,6 +9944,8 @@ projectConfig(
     response.put("ok", Boolean.TRUE)
     response.put("written", Boolean.TRUE)
     response.put("action", pageExists ? "updated" : "created")
+    response.put("mode", minimalMode ? "minimal" : "full")
+    response.put("topics", minimalTopics)
     response.put("target", confluenceLinkName(link))
     response.put("spaceKey", spaceKey)
     response.put("title", title)

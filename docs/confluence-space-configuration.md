@@ -90,13 +90,18 @@ The minimal report is a reduced inventory of every space: **Bereichskey** (linke
 
 ### Export the minimal report
 
-For one space, open its report, tick **Minimal report** in the export form and generate the page; the page title switches to the minimal title. For several, in the space inventory, tick the spaces, choose the target space and overview page as for the bulk export, tick **Minimal report** and press **Export selected (N)**. The run reads the minimal report of every space once at its start, including the macro scan, then writes each space as its own page titled `Confluence space overview - KEY`, holding one table with one row. The selected parent receives a separate summary table, one row per space, next to the overview of the full export if there is one. Each page and the summary are written in the same export transaction as a full export. Neither export ever adopts the other's pages.
+The minimal report writes **no page per space**. It keeps one managed table on the overview page you pick or name, one row per space:
 
-**Topics (Themengebiete).** Every page starts with the topic columns **Themengebiet 1** and **Themengebiet 2** while no topic is known yet. Fill them in, rename them, or add a column to the table on a space page in the Confluence editor, give it a heading and fill it in. On every later export of that space the column is read back and kept verbatim, including lozenges and links; the generated columns are rewritten. A topic found on one page is added to the summary table, and every space page exported afterwards receives the same topic column, empty, so all pages carry one topic set. The summary table shows the topics of each page. It is rewritten from the space pages on every export, so a change made directly in the summary is overwritten; fill in topics on the space pages. A change on a space page reaches the summary with the next export of that space.
+- **Several spaces:** in the space inventory, tick them, choose the target as for the bulk export, tick **Minimal report** and press **Export selected (N)**. All selected rows are written with **one** save of the overview page.
+- **One space:** open its report, tick **Minimal report** in the export form and press the export button. Only that space's row is written; the page title field is not used.
 
-The read of an existing space page is fail-closed, like the Remark carry-over: a page without the minimal marker, a missing or repeated generated column, a repeated topic heading, a column without a heading that holds content, more than one data row, merged cells or a nested table refuse the write for that space.
+An overview page is required: pick one, or type the title of a new one, which the export creates. The table sits next to the overview table of the full export if that page has one; the two never touch each other.
 
-A summary row whose space no longer exists is kept and marked **NO LONGER EXISTS**; delete it by hand if it is not needed. If the space list cannot be read, nothing is marked. The minimal report is not recorded in the export log. With **Minimal report** ticked, the green **in overview** marks refer to the summary table.
+**Topics (Themengebiete).** A new table starts with the columns **Themengebiet 1** and **Themengebiet 2**. Fill them in, rename them, move them or add further columns directly in the table in the Confluence editor. Every export rewrites only the generated columns, which carry an invisible column anchor, and only in the rows of the exported spaces; every other column and every other row is kept verbatim, including lozenges and links. A space exported for the first time gets a row with empty topic cells. Each row carries an invisible anchor with its key in the key cell; keep it there.
+
+The table is read fail-closed: a missing or repeated generated column, a row without its key anchor, two rows with one key, merged cells, a nested table or broken markers refuse the write, and nothing is lost.
+
+A row whose space no longer exists on this instance is kept and marked **NO LONGER EXISTS**; delete it by hand if it is not needed. If the list of spaces cannot be read completely, nothing is marked. The minimal report is not recorded in the export log. With **Minimal report** ticked, the green **in overview** marks show the spaces the table holds.
 
 ## Limits and troubleshooting
 

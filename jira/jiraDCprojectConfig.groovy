@@ -57,7 +57,9 @@
  *                                             workflows, hidden fields
  *   report=full|minimal       default full   minimal is the reduced inventory:
  *                                            key, name, lead, administrators,
- *                                            category, issue count, latest update.
+ *                                            category, issue count, latest update,
+ *                                            used apps, app fields, app workflow
+ *                                            extensions.
  *                                            Without project= it lists every
  *                                            project; format html|json|csv apply.
  *
@@ -191,7 +193,7 @@ class Pc {
     /* The single place the report version lives. The file header points here and
      * every output channel prints this constant, so a report always names the
      * build that produced it. */
-    static final String VERSION = "0.6.1"
+    static final String VERSION = "0.7"
 
     /* Node states. A node is not just present or absent: it can be present but
      * unreadable, and the report has to keep those apart. */
@@ -2111,7 +2113,6 @@ class Render {
         out.append("<div class=\"project-row").append(logLabel == null ? "" : " is-logged")
         out.append("\" data-key=\"").append(Pc.html(key))
         out.append("\" data-title=\"").append(Pc.html(Cx.title(key)))
-        out.append("\" data-minimal-title=\"").append(Pc.html(MinimalReport.title("jira", key)))
         out.append("\" data-find=\"").append(Pc.html((key + " " + name).toLowerCase(Locale.ROOT))).append("\">")
         out.append("<input type=\"checkbox\" class=\"bulk-pick\" onchange=\"selectionChanged()\" aria-label=\"Select ")
         out.append(Pc.html(key)).append("\">")
@@ -2152,11 +2153,9 @@ class Render {
                 Keep this tab open until the run has finished.
             </div>
             <label class="export-note"><input id="bulkMinimal" type="checkbox" onchange="exportTargetChanged()">
-                <strong>Minimal report</strong>: write a one-row page per project instead, titled
-                <strong>${Pc.html(MinimalReport.title("jira", "KEY"))}</strong>, with key, name, lead, administrators,
-                category, issue count and latest issue update. Columns added on such a page are topics: they are kept
-                on every later export, added to every other page and shown in a separate summary table on the
-                overview page.
+                <strong>Minimal report</strong>: write no page per project, only one row per selected project into the minimal
+                table on the overview page, in one save. The generated columns are rewritten; every other column of
+                that table (topics, Themengebiete) is kept.
             </label>
             <div class="export-grid">
                 <button id="bulkRun" class="button" type="button" disabled onclick="startBulk()">Export selected (0)</button>
@@ -2273,13 +2272,10 @@ function selectedItems() {
     var items = [];
     for (var i = 0; i < rows.length; i++) {
         if (!rows[i].querySelector('.bulk-pick').checked) { continue; }
-        items.push({ key: rows[i].getAttribute('data-key'), title: rowTitle(rows[i]), row: rows[i] });
+        items.push({ key: rows[i].getAttribute('data-key'), title: rows[i].getAttribute('data-title'), row: rows[i] });
     }
     return items;
 }
-/* The minimal report writes other pages, under other titles, into its own summary table. */
-function minimalOn() { var box = el('bulkMinimal'); return !!(box && box.checked); }
-function rowTitle(row) { return row.getAttribute(minimalOn() ? 'data-minimal-title' : 'data-title'); }
 function selectionChanged() {
     var count = selectedItems().length;
     el('bulkCount').textContent = count + ' selected';
@@ -2316,6 +2312,8 @@ function loadExported(parentId, spaceKey) {
                 (body.error || 'the overview could not be read.');
             return;
         }
+        var held = body.minimalKeys || [];
+        for (var k = 0; k < held.length; k++) { exportedTitles['key:' + held[k]] = true; }
         var exports = body.exports || [];
         for (var i = 0; i < exports.length; i++) {
             exportedTitles[titleKey(exports[i].space || body.spaceKey, exports[i].title)] = true;
@@ -2332,7 +2330,8 @@ function paintExported() {
     var rows = bulkRows();
     var marked = 0;
     for (var i = 0; i < rows.length; i++) {
-        var hit = exportedTitles[titleKey(spaceKey, rowTitle(rows[i]))] === true;
+        var hit = minimalOn() ? exportedTitles['key:' + rows[i].getAttribute('data-key')] === true
+            : exportedTitles[titleKey(spaceKey, rows[i].getAttribute('data-title'))] === true;
         if (hit) { marked++; }
         markRow(rows[i], hit);
     }
@@ -2355,11 +2354,76 @@ function markRow(row, exported) {
     row.querySelector('.bulk-mark').classList.toggle('hidden', !exported);
 }
 
+/* What a minimal write answered, as one status line. */
+function minimalOutcome(body) {
+    var table = body.table || {};
+    var warnings = body.warnings || [];
+    var updated = table.state === 'updated';
+    var text = updated
+        ? 'Minimal table updated: ' + (body.keys || []).length + ' row(s) on "' + (body.parentTitle || body.parentPageId) + '".'
+        : 'MINIMAL TABLE NOT CONFIRMED. ' + (table.reason || 'The table could not be read back.');
+    if (body.parentAction === 'created') { text += ' The overview page was created by this run.'; }
+    if (warnings.length > 0) { text += ' ' + warnings.join(' '); }
+    return { tone: updated && warnings.length === 0 ? 'good' : 'warn', text: text, updated: updated };
+}
+function showMinimal(body) {
+    var outcome = minimalOutcome(body);
+    var status = say(outcome.tone, outcome.text);
+    if (body.parentPageUrl) {
+        var link = document.createElement('a');
+        link.href = body.parentPageUrl;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = ' Open the overview';
+        status.appendChild(link);
+    }
+    return outcome;
+}
+function minimalOn() { var box = el('bulkMinimal'); return !!(box && box.checked); }
+/* The minimal report: one request, one save of the overview page, for every selected project. */
+function runMinimal(items) {
+    var parentId = el('exportParent').value.trim();
+    var parentTitle = parentId ? '' : el('exportParentQuery').value.trim();
+    if (!parentId && !parentTitle) { say('bad', 'Pick the overview page, or type the title of a new one: the minimal report writes only that page.'); return; }
+    if (!window.confirm('Write ' + items.length + ' project(s) into the minimal table on "' + el('exportParentQuery').value.trim() +
+            '" in space ' + el('exportSpace').value + '? The overview page is saved once; no other page is written.')) { return; }
+    var keys = [];
+    for (var i = 0; i < items.length; i++) { keys.push(items[i].key); }
+    bulkItems = items;
+    lockTarget(true);
+    selectionChanged();
+    say('muted', 'Writing ' + keys.length + ' row(s) into the minimal table...');
+    exportPost({ action: 'minimal', applicationLinkId: el('exportTarget').value, spaceKey: el('exportSpace').value, parentPageId: parentId, parentTitle: parentTitle, keys: keys }).then(function (result) {
+        bulkItems = null;
+        lockTarget(false);
+        var body = result.body || {};
+        if (!result.ok || body.ok !== true) {
+            say('bad', 'Nothing was written (' + result.status + '): ' + (body.error || 'unknown error'));
+            selectionChanged();
+            return;
+        }
+        adoptParent(body);
+        var outcome = showMinimal(body);
+        if (outcome.updated) {
+            var written = body.keys || [];
+            for (var j = 0; j < items.length; j++) {
+                if (written.indexOf(items[j].key) >= 0) { exportedTitles['key:' + items[j].key] = true; markRow(items[j].row, true); }
+            }
+        }
+        selectionChanged();
+    }).catch(function (error) {
+        bulkItems = null;
+        lockTarget(false);
+        selectionChanged();
+        say('bad', 'The request failed, so whether the table changed is unknown: ' + error);
+    });
+}
 function startBulk() {
     var items = selectedItems();
     var spaceKey = el('exportSpace').value;
     if (items.length === 0) { say('bad', 'Select at least one project first.'); return; }
     if (!spaceKey) { say('bad', 'Select a space first.'); return; }
+    if (minimalOn()) { runMinimal(items); return; }
     var parentId = el('exportParent').value.trim();
     var parentTitle = el('exportParentQuery').value.trim();
     var where = parentId ? 'under the page "' + parentTitle + '" (id ' + parentId + ')'
@@ -2400,9 +2464,7 @@ function runBulk(items) {
    that could not be read means nothing was sent; a write request that failed in
    transit means the page may or may not have changed, and it says so. */
 function exportOne(item) {
-    var minimal = minimalOn();
-    var reportUrl = window.location.pathname + '?project=' + encodeURIComponent(item.key) + '&format=json' +
-        (minimal ? '&report=minimal' : '');
+    var reportUrl = window.location.pathname + '?project=' + encodeURIComponent(item.key) + '&format=json';
     return fetch(reportUrl, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (response) {
         if (!response.ok) { throw new Error('HTTP ' + response.status); }
         return response.json();
@@ -2412,7 +2474,6 @@ function exportOne(item) {
         payload.parentPageId = el('exportParent').value.trim();
         payload.parentTitle = payload.parentPageId ? '' : el('exportParentQuery').value.trim();
         payload.title = item.title;
-        if (minimal) { payload.mode = 'minimal'; }
         return exportPost(payload).then(function (result) {
             return writeOutcome(item, result);
         }, function (error) {
@@ -2438,7 +2499,7 @@ function writeOutcome(item, result) {
     var exportLog = body.exportLog || {};
     if (exportLog.state === 'recorded') {
         markLogged(item.row, exportLog.label, exportLog.detail);
-    } else if (exportLog.state !== 'skipped') {
+    } else {
         notes.push('EXPORT LOG NOT UPDATED. ' + (exportLog.reason || 'The server did not report it.'));
     }
     var overview = body.overview || { state: 'skipped' };
@@ -2571,11 +2632,10 @@ window.addEventListener('beforeunload', function (event) {
         String payload = Pc.html(JsonOutput.toJson(report.toMap()))
         String lastLine = Pc.html(lastExportLine(report))
         String defaultTitle = Pc.html(Cx.title(report.projectKey))
-        String minimalTitle = Pc.html(MinimalReport.title("jira", report.projectKey))
-        String actions = """            <label class="export-note"><input id="exportMinimal" type="checkbox"
-                data-full-title="${defaultTitle}" data-minimal-title="${minimalTitle}" onchange="exportModeChanged()">
-                <strong>Minimal report</strong>: write a one-row page with key, name, lead, administrators, category, issue count and latest issue update
-                instead, plus its row in a separate summary table on the parent. Topic columns on that page are kept.
+        String actions = """            <label class="export-note"><input id="exportMinimal" type="checkbox" onchange="exportModeChanged()">
+                <strong>Minimal report</strong>: write no page, only this project's row into the minimal table on the
+                selected overview page. The generated columns are rewritten; every other column of that table
+                (topics, Themengebiete) is kept.
             </label>
             <div class="export-grid">
                 <label class="export-field">Page title
@@ -2952,20 +3012,49 @@ function setView(name) {
 }
 
 """ + exportStageScript() + """/* Stage 4. The write. */
-/* The minimal report: another page, under another title, fed from GET ?report=minimal. */
-function exportMinimalOn() { var box = el('exportMinimal'); return !!(box && box.checked); }
-function exportModeChanged() {
-    var box = el('exportMinimal');
-    var title = el('exportTitle');
-    var from = box.getAttribute(box.checked ? 'data-full-title' : 'data-minimal-title');
-    var to = box.getAttribute(box.checked ? 'data-minimal-title' : 'data-full-title');
-    if (title.value.trim() === '' || title.value.trim() === from) { title.value = to; }
+/* What a minimal write answered, as one status line. */
+function minimalOutcome(body) {
+    var table = body.table || {};
+    var warnings = body.warnings || [];
+    var updated = table.state === 'updated';
+    var text = updated
+        ? 'Minimal table updated: ' + (body.keys || []).length + ' row(s) on "' + (body.parentTitle || body.parentPageId) + '".'
+        : 'MINIMAL TABLE NOT CONFIRMED. ' + (table.reason || 'The table could not be read back.');
+    if (body.parentAction === 'created') { text += ' The overview page was created by this run.'; }
+    if (warnings.length > 0) { text += ' ' + warnings.join(' '); }
+    return { tone: updated && warnings.length === 0 ? 'good' : 'warn', text: text, updated: updated };
 }
-function readMinimal(query) {
-    return fetch(window.location.pathname + '?' + query + '&report=minimal&format=json',
-            { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (response) {
-        if (!response.ok) { throw new Error('the minimal report could not be read (HTTP ' + response.status + ')'); }
-        return response.json();
+function showMinimal(body) {
+    var outcome = minimalOutcome(body);
+    var status = say(outcome.tone, outcome.text);
+    if (body.parentPageUrl) {
+        var link = document.createElement('a');
+        link.href = body.parentPageUrl;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = ' Open the overview';
+        status.appendChild(link);
+    }
+    return outcome;
+}
+function exportModeChanged() { el('exportTitle').disabled = el('exportMinimal').checked; }
+function exportMinimalRow(payload) {
+    var button = el('exportRun');
+    if (!payload.parentPageId && !payload.parentTitle) { say('bad', 'Pick the overview page, or type the title of a new one: the minimal report writes only that page.'); return; }
+    button.disabled = true;
+    say('muted', 'Writing the row into the minimal table...');
+    exportPost({ action: 'minimal', applicationLinkId: payload.applicationLinkId, spaceKey: payload.spaceKey, parentPageId: payload.parentPageId,
+            parentTitle: payload.parentTitle, keys: [payload.project.key] }).then(function (result) {
+        button.disabled = false;
+        var body = result.body || {};
+        if (!result.ok || body.ok !== true) {
+            say('bad', 'Nothing was written (' + result.status + '): ' + (body.error || 'unknown error'));
+            return;
+        }
+        showMinimal(body);
+    }).catch(function (error) {
+        button.disabled = false;
+        say('bad', 'The request failed, so whether the table changed is unknown: ' + error);
     });
 }
 function exportToConfluence() {
@@ -2984,20 +3073,11 @@ function exportToConfluence() {
     payload.title = el('exportTitle').value.trim();
     if (!payload.applicationLinkId) { fail('Select the target Confluence first.'); return; }
     if (!payload.spaceKey) { fail('Select a space first.'); return; }
+    if (el('exportMinimal') && el('exportMinimal').checked) { exportMinimalRow(payload); return; }
     if (!payload.title) { fail('Enter a page title first.'); return; }
     button.disabled = true;
-    var minimal = exportMinimalOn();
-    if (minimal) { say('muted', 'Reading the minimal report...'); }
-    var read = minimal ? readMinimal('project=' + encodeURIComponent(payload.project.key)) : Promise.resolve(payload);
-    read.then(function (body) {
-        if (minimal) {
-            var fields = ['applicationLinkId', 'spaceKey', 'parentPageId', 'parentTitle', 'title'];
-            for (var i = 0; i < fields.length; i++) { body[fields[i]] = payload[fields[i]]; }
-            body.mode = 'minimal';
-        }
-        say('muted', 'Writing page...');
-        return exportPost(body);
-    }).then(function (result) {
+    say('muted', 'Writing page...');
+    exportPost(payload).then(function (result) {
         button.disabled = false;
         var body = result.body || {};
         if (!result.ok || body.ok !== true) {
@@ -3042,16 +3122,14 @@ function exportToConfluence() {
         var logText = '';
         if (exportLog.state === 'recorded') {
             el('exportLastLine').textContent = 'Last export: ' + exportLog.detail;
-        } else if (exportLog.state !== 'skipped') {
+        } else {
             if (tone === 'good') { tone = 'warn'; }
             logText = ' EXPORT LOG NOT UPDATED. ' + (exportLog.reason || 'The server did not report it.');
         }
         var status = say(tone, 'Page ' + body.action + ': "' + body.title + '" in ' + body.spaceKey +
-            ' (version ' + version + ').' + (body.mode === 'minimal'
-                ? ' Minimal report, topics: ' + ((body.topics || []).join(', ') || 'none') + '.'
-                : ' Remark read: ' + body.remarkRead +
-                  ', carried over: ' + body.remarksCarried + ' of ' + body.remarksRead +
-                  ', without a matching item: ' + body.orphanedRemarks + '.') + parent + overviewText + logText);
+            ' (version ' + version + '). Remark read: ' + body.remarkRead +
+            ', carried over: ' + body.remarksCarried + ' of ' + body.remarksRead +
+            ', without a matching item: ' + body.orphanedRemarks + '.' + parent + overviewText + logText);
         if (body.pageUrl) {
             var link = document.createElement('a');
             link.href = body.pageUrl;
@@ -4337,8 +4415,6 @@ class Cx {
 
 class ConfigOverview {
     static String prefix(String product) { 'cfcon-overview-' + product + '-' }
-    /* The heading of the identity column. The minimal overviews (jiraminimal, confluenceminimal) share it. */
-    static String noun(String product) { product.startsWith('jira') ? 'Project' : 'Space' }
     static String anchor(String name) {
         '<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">' + Cx.esc(name) +
             '</ac:parameter></ac:structured-macro>'
@@ -4396,8 +4472,7 @@ class ConfigOverview {
     static Map<String, Object> read(String body, String product, String space) {
         if (body == null) { throw new IllegalArgumentException('Overview body could not be read.') }
         if (!space) { throw new IllegalArgumentException('Overview space is unknown.') }
-        if (body.contains('cfcon-space-config-export/1') || body.contains('cfcon-project-config-export/1') ||
-            body.contains(MinimalReport.JIRA_MARKER) || body.contains(MinimalReport.CONFLUENCE_MARKER)) {
+        if (body.contains('cfcon-space-config-export/1') || body.contains('cfcon-project-config-export/1')) {
             throw new IllegalArgumentException('A detail export cannot be used as its own overview.')
         }
         List<Map<String, Object>> starts = matches(body, java.util.regex.Pattern.quote(prefix(product) + 'start'))
@@ -4409,8 +4484,7 @@ class ConfigOverview {
             throw new IllegalArgumentException('Overview table markers are missing, duplicated or out of order.')
         }
         String block = body.substring(starts.get(0).end as int, ends.get(0).start as int)
-        /* A minimal overview carries one plain paragraph above its table: the note that the table is generated. */
-        def table = java.util.regex.Pattern.compile('(?s)^\\s*(?:<p>[^<]*</p>\\s*)?<table\\b[^>]*>\\s*<tbody\\b[^>]*>(.*?)</tbody>\\s*</table>\\s*$').matcher(block)
+        def table = java.util.regex.Pattern.compile('(?s)^\\s*<table\\b[^>]*>\\s*<tbody\\b[^>]*>(.*?)</tbody>\\s*</table>\\s*$').matcher(block)
         if (!table.matches()) { throw new IllegalArgumentException('Overview table is malformed.') }
         String tableBody = table.group(1)
         if (tableBody.contains('<table')) { throw new IllegalArgumentException('Overview table is nested.') }
@@ -4440,7 +4514,7 @@ class ConfigOverview {
             if (!keys.add(key)) { throw new IllegalArgumentException('Overview contains duplicate columns.') }
             columns.add([key: key, html: header.get(i)])
         }
-        if (header.isEmpty() || text(header.get(0)) != noun(product)) {
+        if (header.isEmpty() || text(header.get(0)) != (product == 'jira' ? 'Project' : 'Space')) {
             throw new IllegalArgumentException('Overview header is not this exporter\'s header.')
         }
         Set<String> ids = [] as Set
@@ -4494,18 +4568,11 @@ class ConfigOverview {
         List<String> row = [anchor(prefix(product) + 'row-' + pageId) + link(title, space, label, null)]
         for (Map<String, String> column : columns) {
             Map<String, String> section = byKey.get(column.key)
-            /* A section with html carries its own cell (the minimal overview); every other one links to its anchor. */
-            row.add(section == null ? '' : section.html != null ? section.html :
-                link(title, space, section.label + ' (' + section.count + ')', section.anchor))
+            row.add(section == null ? '' : link(title, space, section.label + ' (' + section.count + ')', section.anchor))
         }
         if (found.isEmpty()) { rows.add(row) } else { rows.set(found.get(0), row) }
-        compose(model, product, columns, rows)
-    }
-    static String compose(Map<String, Object> model, String product, List<Map<String, String>> columns, List<List<String>> rows) {
         StringBuilder out = new StringBuilder(model.before.toString())
-        out.append(marker(product, 'start'))
-        if (product.endsWith('minimal')) { out.append('<p>').append(Cx.esc(MinimalReport.OVERVIEW_NOTE)).append('</p>') }
-        out.append('<table><tbody><tr><th>').append(noun(product)).append('</th>')
+        out.append(marker(product, 'start')).append('<table><tbody><tr><th>').append(product == 'jira' ? 'Project' : 'Space').append('</th>')
         columns.each { out.append('<th>').append(it.html).append('</th>') }
         out.append('</tr>')
         rows.each { cells ->
@@ -4527,10 +4594,6 @@ class ConfigOverview {
             int column = columns.findIndexOf { it.key == section.key }
             if (column < 0) { return false }
             String cell = row.get(column + 1)
-            if (section.html != null) {
-                if (text(cell) != text(section.html)) { return false }
-                continue
-            }
             def resource = java.util.regex.Pattern.compile('<ri:page\\b[^>]*/>').matcher(cell)
             def target = java.util.regex.Pattern.compile('<ac:link\\b[^>]*>').matcher(cell)
             if (text(cell) != Cx.plainText(Cx.esc(section.label + ' (' + section.count + ')')) || !resource.find() || !target.find() ||
@@ -4613,7 +4676,7 @@ class ConfigOverview {
 
 class OverviewExport {
     static Map maintain(String product, String parentId, String pageId, String title, String space, String label,
-                        List<Map<String, String>> sections, Closure reader, Closure writer, Closure adjust = null) {
+                        List<Map<String, String>> sections, Closure reader, Closure writer) {
         if (!parentId) { return [state: 'skipped', reason: 'No overview page was selected.'] }
         String stage = 'read'
         try {
@@ -4624,8 +4687,6 @@ class OverviewExport {
                 return [state: 'failed', reason: 'Overview identity, body or version could not be confirmed. ' + (page.error ?: '')]
             }
             String merged = ConfigOverview.upsert(page.storage.toString(), product, pageId, title, space, label, sections)
-            /* The minimal export marks rows of objects that no longer exist; it never removes one. */
-            if (adjust != null) { merged = (String) adjust.call(merged) }
             stage = 'write'
             Map saved
             try { saved = (Map) writer.call(page, merged) }
@@ -4722,34 +4783,33 @@ class OverviewExport {
     }
 }
 
-/* The minimal report: one small page per project or space and a summary row on the
- * overview, with the inventory columns of the requirement and the administrators'
- * topic columns (Themengebiete). The object page is the source of the topics: every
- * column there that is not a generated one is carried over verbatim, like a Remark,
- * and shown on the overview. The overview is a summary and is rewritten from the
- * pages. Pure and identical in both endpoints; the product names the column set. */
+/* The minimal report: one managed table on the selected overview page, one row per
+ * project or space, with the inventory columns of the requirement. The generated
+ * columns carry a column anchor and are rewritten by every export; every other
+ * column is the administrators' (topics, Themengebiete) and is kept verbatim, cell
+ * by cell, keyed by the row anchor that holds the project or space key. Pure and
+ * identical in both endpoints; the product names the column set. */
 class MinimalReport {
-    static final String JIRA_MARKER = 'cfcon-project-minimal-export/1'
-    static final String CONFLUENCE_MARKER = 'cfcon-space-minimal-export/1'
-    static final String TOPIC = 'topic:'
-    static final String COLUMN = 'minimal-'
     static final String GONE = 'NO LONGER EXISTS'
-    /* The topic columns every page starts with while no topic is known yet, as in the requirement. */
+    /* The topic columns a new table starts with, as in the requirement. */
     static final List<String> DEFAULT_TOPICS = ['Themengebiet 1', 'Themengebiet 2']
-    static final String OVERVIEW_NOTE = 'Generated by the minimal report. Fill in topics (Themengebiete) on the page of ' +
-        'each project or space: this table is rewritten from those pages by every export, so a change made here is overwritten.'
+    static final String NOTE = 'Generated by the minimal report. The generated columns are rewritten by every export. ' +
+        'Every other column is yours: add, rename and fill in topics (Themengebiete) here, they are kept.'
     static final String GONE_LOZENGE = '<ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Red</ac:parameter>' +
         '<ac:parameter ac:name="title">' + GONE + '</ac:parameter></ac:structured-macro>'
     static final java.util.regex.Pattern GONE_MARK = java.util.regex.Pattern.compile(
         '(?s)\\s*<ac:structured-macro\\b(?=[^>]*\\bac:name="status")[^>]*>(?:(?!</ac:structured-macro>).)*?' +
         java.util.regex.Pattern.quote(GONE) + '(?:(?!</ac:structured-macro>).)*?</ac:structured-macro>')
     static final java.util.regex.Pattern MERGED = java.util.regex.Pattern.compile('(?i)\\b(?:rowspan|colspan)\\s*=')
+    static final int MAX_KEYS = 5000
+    static final String PARENT_BODY = '<p>Overview page of the minimal report. It was created by that export because the ' +
+        'chosen overview page did not exist yet. The table below is maintained by the export.</p>'
 
-    /* Id and heading of every generated column, in page order. The headings are the
-     * requirement's own; they are what the page read recognises. */
+    /* Id and heading of every generated column, in table order. */
     static final List<List<String>> JIRA_COLUMNS = [
         ['key', 'Project key'], ['name', 'Projektname'], ['lead', 'Projekt-Lead'], ['admins', 'Projekt-Admins'],
-        ['category', 'Projekt-Kategorie'], ['issues', 'Anzahl Issues'], ['lastUpdate', 'Last Issue Update']]
+        ['category', 'Projekt-Kategorie'], ['issues', 'Anzahl Issues'], ['lastUpdate', 'Last Issue Update'],
+        ['apps', 'Verwendete Apps'], ['appFields', 'Anzahl App-Felder'], ['workflowExtensions', 'Anzahl Workflow-Erweiterungen']]
     static final List<List<String>> CONFLUENCE_COLUMNS = [
         ['key', 'Bereichskey'], ['name', 'Bereichsname'], ['description', 'Bereichsbeschreibung'], ['category', 'Kategorie'],
         ['admins', 'Administratoren'], ['pages', 'Anzahl Seiten'], ['apps', 'Verwendete Apps'],
@@ -4757,13 +4817,9 @@ class MinimalReport {
 
     static boolean jira(String product) { product == 'jira' }
     static List<List<String>> columns(String product) { jira(product) ? JIRA_COLUMNS : CONFLUENCE_COLUMNS }
-    static String marker(String product) { jira(product) ? JIRA_MARKER : CONFLUENCE_MARKER }
-    static String overviewProduct(String product) { product + 'minimal' }
-    static String title(String product, String key) {
-        String candidate = (jira(product) ? 'Jira project overview - ' : 'Confluence space overview - ') +
-            (key == null || key.trim().isEmpty() ? 'unknown' : key.trim())
-        candidate.length() > 255 ? candidate.substring(0, 255) : candidate
-    }
+    static String prefix(String product) { 'cfcon-minimal-' + product + '-' }
+    static String marker(String product, String part) { '<p>' + ConfigOverview.anchor(prefix(product) + part) + '</p>' }
+    static String encode(String key) { Base64.urlEncoder.withoutPadding().encodeToString(key.getBytes('UTF-8')) }
     static String href(String product, String baseUrl, String key) {
         if (baseUrl == null || baseUrl.trim().isEmpty() || key == null || key.trim().isEmpty()) { return null }
         String base = baseUrl.trim()
@@ -4800,157 +4856,198 @@ class MinimalReport {
         String link = id == 'key' ? href(product, baseUrl, text) : null
         link == null ? body : '<a href="' + Cx.esc(link) + '">' + body + '</a>'
     }
-
-    static Map<String, Object> refused(String reason) { [ok: false, reason: reason, topics: new LinkedHashMap<String, String>()] as Map<String, Object> }
-
-    /* The topics of an existing object page, header to cell, in page order. Fail closed:
-     * whatever this read cannot place exactly refuses the write, because a topic that
-     * cannot be read is a topic that must not be overwritten. */
-    static Map<String, Object> parse(String storage, String product) {
-        try {
-            if (storage == null || storage.trim().isEmpty()) {
-                return refused('The existing page has an empty body. It was not produced by this export, so it is not overwritten.')
-            }
-            if (!storage.contains(marker(product))) {
-                return refused('The existing page does not carry the export marker "' + marker(product) +
-                    '". It was not produced by this export, so it is not overwritten.')
-            }
-            if (Cx.hasNestedTableBody(storage)) {
-                return refused('A table is nested inside another table on the existing page. Take it out of the topic cell and export again; nothing is written.')
-            }
-            List<String> labels = []
-            for (List<String> column : columns(product)) { labels.add(column.get(1)) }
-            List<List<String>> table = null
-            boolean merged = false
-            int tables = 0
-            java.util.regex.Matcher bodies = Cx.TBODY.matcher(storage)
-            while (bodies.find()) {
-                List<List<String>> rows = []
-                boolean mergedHere = false
-                java.util.regex.Matcher rowMatcher = Cx.ROW.matcher(bodies.group(1))
-                while (rowMatcher.find()) {
-                    if (MERGED.matcher(rowMatcher.group(1)).find()) { mergedHere = true }
-                    rows.add(Cx.cellsOf(rowMatcher.group(1)))
-                }
-                if (rows.isEmpty() || Cx.headerIndex(rows.get(0), labels.get(0)) < 0) { continue }
-                tables++
-                table = rows
-                merged = mergedHere
-            }
-            if (tables != 1 || table == null) {
-                return refused('The existing page carries ' + tables + ' table(s) with the column "' + labels.get(0) +
-                    '" where exactly one is expected. Nothing is written.')
-            }
-            if (merged) { return refused('The table on the existing page uses merged cells, which cannot be carried over safely. Nothing is written.') }
-            List<String> header = table.get(0)
-            Set<Integer> generated = new HashSet<Integer>()
-            for (String label : labels) {
-                List<Integer> found = []
-                for (int i = 0; i < header.size(); i++) { if (Cx.plainText(header.get(i)).equalsIgnoreCase(label)) { found.add(i) } }
-                if (found.size() != 1) {
-                    return refused('The column "' + label + '" is ' + (found.isEmpty() ? 'missing from' : 'repeated on') +
-                        ' the existing page. Restore it and export again; nothing is written.')
-                }
-                generated.add(found.get(0))
-            }
-            List<List<String>> data = []
-            for (int i = 1; i < table.size(); i++) {
-                List<String> cells = table.get(i)
-                if (!cells.every { String value -> Cx.isEmptyCell(value) }) { data.add(cells) }
-            }
-            if (data.size() > 1) { return refused('The table on the existing page carries ' + data.size() + ' data rows where one is expected. Nothing is written.') }
-            List<String> values = data.isEmpty() ? new ArrayList<String>() : data.get(0)
-            if (!values.isEmpty() && values.size() != header.size()) {
-                return refused('The data row of the existing page carries ' + values.size() + ' cell(s) under ' + header.size() + ' heading(s). Nothing is written.')
-            }
-            Map<String, String> topics = new LinkedHashMap<String, String>()
-            Set<String> seen = new HashSet<String>()
-            for (int i = 0; i < header.size(); i++) {
-                if (generated.contains(i)) { continue }
-                String name = Cx.plainText(header.get(i))
-                String value = values.isEmpty() ? '' : values.get(i).trim()
-                boolean empty = Cx.isEmptyCell(value)
-                if (name.isEmpty()) {
-                    if (empty) { continue }
-                    return refused('A column without a heading carries content on the existing page. Give it a heading and export again; nothing is written.')
-                }
-                if (!seen.add(name.toLowerCase(Locale.ROOT))) {
-                    return refused('The topic "' + name + '" appears more than once on the existing page. Nothing is written.')
-                }
-                topics.put(name, empty ? '' : value)
-            }
-            [ok: true, reason: null, topics: topics] as Map<String, Object>
-        } catch (Throwable error) {
-            refused('The topic read failed (' + Cx.errorDetail(error) + '); nothing is written.')
-        }
+    /* The cell of one generated column; the key cell also carries the row anchor. */
+    static String generated(String product, String baseUrl, String id, Map<String, Object> item) {
+        String html = cell(product, baseUrl, id, item.get(id))
+        id == 'key' ? ConfigOverview.anchor(prefix(product) + 'row-' + encode(shown(item.get('key')))) + html : html
     }
 
-    /* The topic headings the overview already holds, in column order. No overview yet is no topic. */
-    static List<String> knownTopics(String overviewBody, String product, String space) {
-        List<String> names = []
-        if (overviewBody == null) { return names }
-        Map<String, Object> model = ConfigOverview.read(overviewBody, overviewProduct(product), space)
-        for (Map<String, String> column : (List<Map<String, String>>) model.columns) {
-            if (column.key.startsWith(TOPIC)) { names.add(column.key.substring(TOPIC.length())) }
+    /* The managed table, read fail-closed. Without a table: header is null. */
+    static Map<String, Object> read(String body, String product) {
+        if (body == null) { throw new IllegalArgumentException('The overview body could not be read.') }
+        String pre = prefix(product)
+        List<Map<String, Object>> starts = ConfigOverview.matches(body, java.util.regex.Pattern.quote(pre + 'start'))
+        List<Map<String, Object>> ends = ConfigOverview.matches(body, java.util.regex.Pattern.quote(pre + 'end'))
+        if (starts.isEmpty() && ends.isEmpty() && !body.contains(pre)) {
+            return [before: body, after: '', header: null, ids: [:], rows: []] as Map<String, Object>
         }
-        names
-    }
-    /* One topic set for every page: the overview's order first, then topics only this page knows.
-     * While neither knows a topic, the set is DEFAULT_TOPICS. */
-    static List<String> topicOrder(List<String> known, Collection<String> onPage) {
-        List<String> order = []
-        Set<String> seen = new HashSet<String>()
-        List<String> all = new ArrayList<String>(known == null ? new ArrayList<String>() : known)
-        if (onPage != null) { all.addAll(onPage) }
-        for (String name : all) {
-            if (name != null && !name.trim().isEmpty() && seen.add(name.trim().toLowerCase(Locale.ROOT))) { order.add(name.trim()) }
+        if (starts.size() != 1 || ends.size() != 1 || (starts.get(0).end as int) > (ends.get(0).start as int)) {
+            throw new IllegalArgumentException('The minimal table markers are missing, duplicated or out of order.')
         }
-        order.isEmpty() ? new ArrayList<String>(DEFAULT_TOPICS) : order
-    }
-
-    /* The object page, and the cells of its overview row. item maps a column id to its payload value. */
-    static Map<String, Object> render(String product, String baseUrl, Map<String, Object> item, Map<String, String> pageTopics,
-                                      List<String> knownTopics, String generatedAt, String version) {
-        Map<String, String> byName = new HashMap<String, String>()
-        for (Map.Entry<String, String> entry : pageTopics.entrySet()) { byName.put(entry.getKey().toLowerCase(Locale.ROOT), entry.getValue()) }
-        List<String> topics = topicOrder(knownTopics, pageTopics.keySet())
-        String noun = jira(product) ? 'project' : 'space'
-        StringBuilder out = new StringBuilder()
-        out.append('<p>Overview of ').append(noun).append(' <strong>').append(Cx.esc(shown(item.get('name')) ?: 'unknown'))
-        out.append('</strong> (').append(Cx.esc(shown(item.get('key')) ?: '?')).append('). Generated ')
-        out.append(Cx.esc(generatedAt ?: 'unknown')).append(' by the minimal report v').append(Cx.esc(version ?: '?')).append('.</p>')
-        out.append('<p>Add a column for each topic (Themengebiet) and fill it in on this page. Every column that is not ')
-        out.append('one of the generated ones is kept on the next export and shown on the overview page. Everything else ')
-        out.append('on this page is overwritten each time.</p>')
-        List<Map<String, String>> sections = []
-        StringBuilder head = new StringBuilder('<tr>')
-        StringBuilder row = new StringBuilder('<tr>')
+        String block = body.substring(starts.get(0).end as int, ends.get(0).start as int)
+        java.util.regex.Matcher table = java.util.regex.Pattern.compile(
+            '(?s)^\\s*(?:<p>[^<]*</p>\\s*)?<table\\b[^>]*>\\s*<tbody\\b[^>]*>(.*?)</tbody>\\s*</table>\\s*$').matcher(block)
+        if (!table.matches()) { throw new IllegalArgumentException('The minimal table is malformed.') }
+        String tableBody = table.group(1)
+        if (tableBody.contains('<table')) { throw new IllegalArgumentException('A table is nested inside the minimal table.') }
+        List<List<String>> rows = []
+        java.util.regex.Matcher rowMatcher = Cx.ROW.matcher(tableBody)
+        int consumed = 0
+        while (rowMatcher.find()) {
+            if (!tableBody.substring(consumed, rowMatcher.start()).trim().isEmpty()) { throw new IllegalArgumentException('Unexpected content in the minimal table.') }
+            if (MERGED.matcher(rowMatcher.group(1)).find()) { throw new IllegalArgumentException('The minimal table uses merged cells, which cannot be updated safely.') }
+            rows.add(Cx.cellsOf(rowMatcher.group(1)))
+            consumed = rowMatcher.end()
+        }
+        if (!tableBody.substring(consumed).trim().isEmpty() || rows.isEmpty()) { throw new IllegalArgumentException('The minimal table has no header.') }
+        List<String> header = rows.remove(0)
+        Map<String, Integer> ids = new LinkedHashMap<String, Integer>()
+        for (int i = 0; i < header.size(); i++) {
+            List<Map<String, Object>> marks = ConfigOverview.matches(header.get(i), java.util.regex.Pattern.quote(pre + 'col-') + '[A-Za-z0-9]+')
+            if (marks.size() > 1) { throw new IllegalArgumentException('A heading of the minimal table carries more than one column anchor.') }
+            if (marks.size() == 1) {
+                String id = ((String) marks.get(0).name).substring((pre + 'col-').length())
+                if (ids.put(id, Integer.valueOf(i)) != null) { throw new IllegalArgumentException('The generated column ' + id + ' appears twice.') }
+            }
+        }
         for (List<String> column : columns(product)) {
-            String html = cell(product, baseUrl, column.get(0), item.get(column.get(0)))
-            head.append('<th>').append(Cx.esc(column.get(1))).append('</th>')
-            row.append('<td>').append(html).append('</td>')
-            if (column.get(0) != 'name') {
-                sections.add([key: COLUMN + column.get(0), column: column.get(1), label: column.get(1), anchor: '', count: '', html: html] as Map<String, String>)
+            if (!ids.containsKey(column.get(0))) {
+                throw new IllegalArgumentException('The generated column "' + column.get(1) + '" is missing from the minimal table. Restore it; nothing is written.')
             }
         }
-        for (String topic : topics) {
-            String html = byName.get(topic.toLowerCase(Locale.ROOT)) ?: ''
-            head.append('<th>').append(Cx.esc(topic)).append('</th>')
-            row.append('<td>').append(html).append('</td>')
-            sections.add([key: TOPIC + topic, column: topic, label: topic, anchor: '', count: '', html: html] as Map<String, String>)
+        int keyColumn = ids.get('key').intValue()
+        Set<String> keys = new HashSet<String>()
+        for (int i = 0; i < rows.size(); i++) {
+            List<String> row = rows.get(i)
+            if (row.size() != header.size()) { throw new IllegalArgumentException('Row ' + (i + 1) + ' of the minimal table has ' + row.size() + ' cells under ' + header.size() + ' headings.') }
+            String key = rowKey(row.get(keyColumn), product)
+            if (key == null) { throw new IllegalArgumentException('Row ' + (i + 1) + ' of the minimal table has no row anchor in its key cell.') }
+            if (!keys.add(key)) { throw new IllegalArgumentException('The key ' + key + ' has two rows in the minimal table.') }
         }
-        out.append('<table><tbody>').append(head).append('</tr>').append(row).append('</tr></tbody></table>')
-        out.append('<p><em>').append(Cx.esc(marker(product))).append('</em></p>')
-        [storage: out.toString(), sections: sections, topics: topics] as Map<String, Object>
+        [before: body.substring(0, starts.get(0).start as int), after: body.substring(ends.get(0).end as int),
+         header: header, ids: ids, rows: rows] as Map<String, Object>
+    }
+    static String rowKey(String keyCell, String product) {
+        List<Map<String, Object>> marks = ConfigOverview.matches(keyCell, java.util.regex.Pattern.quote(prefix(product) + 'row-') + '[A-Za-z0-9_-]+')
+        if (marks.size() != 1) { return null }
+        new String(Base64.urlDecoder.decode(((String) marks.get(0).name).substring((prefix(product) + 'row-').length())), 'UTF-8')
+    }
+    /* The keys the table holds, so a list of projects or spaces can mark them. */
+    static List<String> keys(String body, String product) {
+        Map<String, Object> model = read(body, product)
+        List<String> found = []
+        if (model.header == null) { return found }
+        int keyColumn = ((Map<String, Integer>) model.ids).get('key').intValue()
+        for (List<String> row : (List<List<String>>) model.rows) { found.add(rowKey(row.get(keyColumn), product)) }
+        found
     }
 
-    /* GET ?report=minimal&format=csv: one row per object, the values as the page shows them. */
+    /* The table with every item's generated cells rewritten and every other cell kept. A new
+     * table starts with DEFAULT_TOPICS. Rows of keys not in existingKeys are marked, never
+     * removed; without a complete key list nothing is marked. */
+    static String merge(String body, String product, String baseUrl, List<Map<String, Object>> items, Set<String> existingKeys) {
+        Map<String, Object> model = read(body, product)
+        List<String> header = (List<String>) model.header
+        Map<String, Integer> ids = (Map<String, Integer>) model.ids
+        List<List<String>> rows = (List<List<String>>) model.rows
+        if (header == null) {
+            header = []
+            ids = new LinkedHashMap<String, Integer>()
+            for (List<String> column : columns(product)) {
+                ids.put(column.get(0), Integer.valueOf(header.size()))
+                header.add(ConfigOverview.anchor(prefix(product) + 'col-' + column.get(0)) + Cx.esc(column.get(1)))
+            }
+            for (String topic : DEFAULT_TOPICS) { header.add(Cx.esc(topic)) }
+        }
+        int keyColumn = ids.get('key').intValue()
+        Map<String, List<String>> byKey = new HashMap<String, List<String>>()
+        for (List<String> row : rows) { byKey.put(rowKey(row.get(keyColumn), product), row) }
+        List<List<String>> added = []
+        for (Map<String, Object> item : items) {
+            String key = shown(item.get('key'))
+            if (key.isEmpty()) { throw new IllegalArgumentException('An item without a key cannot be written.') }
+            List<String> row = byKey.get(key)
+            if (row == null) {
+                row = new ArrayList<String>()
+                for (int i = 0; i < header.size(); i++) { row.add('') }
+                byKey.put(key, row)
+                added.add(row)
+            }
+            for (List<String> column : columns(product)) {
+                row.set(ids.get(column.get(0)).intValue(), generated(product, baseUrl, column.get(0), item))
+            }
+        }
+        added.sort { List<String> left, List<String> right -> rowKey(left.get(keyColumn), product).compareToIgnoreCase(rowKey(right.get(keyColumn), product)) }
+        rows.addAll(added)
+        if (existingKeys != null) {
+            for (List<String> row : rows) {
+                String clean = GONE_MARK.matcher(row.get(keyColumn)).replaceAll('')
+                row.set(keyColumn, existingKeys.contains(rowKey(clean, product)) ? clean : clean + ' ' + GONE_LOZENGE)
+            }
+        }
+        StringBuilder out = new StringBuilder(model.before.toString())
+        out.append(marker(product, 'start')).append('<p>').append(Cx.esc(NOTE)).append('</p><table><tbody><tr>')
+        for (String heading : header) { out.append('<th>').append(heading).append('</th>') }
+        out.append('</tr>')
+        for (List<String> row : rows) {
+            out.append('<tr>')
+            for (String value : row) { out.append('<td>').append(value).append('</td>') }
+            out.append('</tr>')
+        }
+        out.append('</tbody></table>').append(marker(product, 'end')).append(model.after).toString()
+    }
+
+    /* The keys whose generated cells do not read back as written. */
+    static List<String> unconfirmed(String body, String product, String baseUrl, List<Map<String, Object>> items) {
+        Map<String, Object> model = read(body, product)
+        List<String> missing = []
+        if (model.header == null) {
+            for (Map<String, Object> item : items) { missing.add(shown(item.get('key'))) }
+            return missing
+        }
+        Map<String, Integer> ids = (Map<String, Integer>) model.ids
+        int keyColumn = ids.get('key').intValue()
+        Map<String, List<String>> byKey = new HashMap<String, List<String>>()
+        for (List<String> row : (List<List<String>>) model.rows) { byKey.put(rowKey(row.get(keyColumn), product), row) }
+        for (Map<String, Object> item : items) {
+            String key = shown(item.get('key'))
+            List<String> row = byKey.get(key)
+            boolean same = row != null
+            for (List<String> column : columns(product)) {
+                if (!same) { break }
+                same = ConfigOverview.text(row.get(ids.get(column.get(0)).intValue())) == ConfigOverview.text(generated(product, null, column.get(0), item))
+            }
+            if (!same) { missing.add(key) }
+        }
+        missing
+    }
+
+    /* Read, merge, one versioned save, read back: the stages of OverviewExport.maintain. */
+    static Map<String, Object> update(String parentId, String space, Closure reader, Closure writer, Closure merger, Closure checker) {
+        String stage = 'read'
+        try {
+            Map page = (Map) reader.call()
+            Object pageVersion = page.version
+            if (page.ok != Boolean.TRUE || page.id != parentId || page.spaceKey != space ||
+                !(pageVersion instanceof Number) || ((Number) pageVersion).intValue() < 1 || page.storage == null) {
+                return [state: 'failed', reason: 'Overview identity, body or version could not be confirmed. ' + (page.error ?: '')] as Map<String, Object>
+            }
+            String merged = (String) merger.call(page.storage.toString())
+            stage = 'write'
+            Map saved
+            try { saved = (Map) writer.call(page, merged) }
+            catch (Exception error) { saved = [ok: false, error: Cx.errorDetail(error)] }
+            if (saved.refused == Boolean.TRUE) { return [state: 'failed', reason: 'Overview write was refused: ' + (saved.error ?: 'write refused')] as Map<String, Object> }
+            stage = 'verify'
+            Map measured = (Map) reader.call()
+            Object measuredVersion = measured.version
+            List<String> missing = measured.ok == Boolean.TRUE ? (List<String>) checker.call(measured.storage as String) : null
+            if (measured.ok != Boolean.TRUE || measured.id != parentId || !(measuredVersion instanceof Number) ||
+                ((Number) measuredVersion).intValue() <= ((Number) pageVersion).intValue() || missing == null || !missing.isEmpty()) {
+                return [state: 'unknown', reason: 'The minimal table could not be confirmed after the write' +
+                    (missing ? ' for ' + missing.join(', ') : '') + '. ' + (saved.error ?: '')] as Map<String, Object>
+            }
+            [state: 'updated', reason: null, pageId: parentId, pageVersion: measuredVersion] as Map<String, Object>
+        } catch (Exception error) {
+            [state: stage == 'verify' ? 'unknown' : 'failed', reason: 'Minimal table ' + stage + ': ' + Cx.errorDetail(error)] as Map<String, Object>
+        }
+    }
+
+    /* GET ?report=minimal&format=csv: one row per object, the values as the table shows them. */
     static String csv(String product, List<Map<String, Object>> rows) {
         StringBuilder out = new StringBuilder()
         List<String> header = new ArrayList<String>()
-        for (List<String> column : columns(product)) {
-            header.add(Pc.csv(column.get(1)))
-        }
+        for (List<String> column : columns(product)) { header.add(Pc.csv(column.get(1))) }
         out.append(header.join(";")).append("\n")
         for (Map<String, Object> row : rows) {
             Map<String, Object> values = Cx.sub(row, "minimal")
@@ -4960,7 +5057,7 @@ class MinimalReport {
             }
             out.append(cells.join(";")).append("\n")
         }
-        return out.toString()
+        out.toString()
     }
 
     static String htmlPage(String product, String baseUrl, String heading, String generatedAt, List<Map<String, Object>> rows) {
@@ -4974,9 +5071,7 @@ class MinimalReport {
         out.append("<h1>").append(Pc.html(heading)).append("</h1>\n<p>Generated ").append(Pc.html(generatedAt))
         out.append(" by the minimal report v").append(Pc.html(Pc.VERSION)).append(". A value marked * is a lower bound.</p>\n")
         out.append("<table><thead><tr>")
-        for (List<String> column : columns(product)) {
-            out.append("<th>").append(Pc.html(column.get(1))).append("</th>")
-        }
+        for (List<String> column : columns(product)) { out.append("<th>").append(Pc.html(column.get(1))).append("</th>") }
         out.append("</tr></thead><tbody>\n")
         for (Map<String, Object> row : rows) {
             Map<String, Object> values = Cx.sub(row, "minimal")
@@ -4987,28 +5082,7 @@ class MinimalReport {
             out.append("</tr>\n")
         }
         out.append("</tbody></table>\n</body>\n</html>\n")
-        return out.toString()
-    }
-
-    /* Marks the overview rows whose key is not among the existing ones, and unmarks a key
-     * that exists again. Nothing is removed. Without a complete key list nothing changes. */
-    static String markGone(String body, String product, String space, Set<String> existingKeys) {
-        if (existingKeys == null) { return body }
-        String overview = overviewProduct(product)
-        Map<String, Object> model = ConfigOverview.read(body, overview, space)
-        List<Map<String, String>> columns = (List<Map<String, String>>) model.columns
-        List<List<String>> rows = (List<List<String>>) model.rows
-        int keyColumn = columns.findIndexOf { Map<String, String> column -> column.key == COLUMN + 'key' }
-        if (keyColumn < 0) { return body }
-        boolean changed = false
-        for (List<String> cells : rows) {
-            String current = cells.get(keyColumn + 1)
-            String clean = GONE_MARK.matcher(current).replaceAll('')
-            String key = Cx.plainText(clean)
-            String next = key.isEmpty() || existingKeys.contains(key) ? clean : clean + ' ' + GONE_LOZENGE
-            if (next != current) { cells.set(keyColumn + 1, next); changed = true }
-        }
-        changed ? ConfigOverview.compose(model, overview, columns, rows) : body
+        out.toString()
     }
 }
 
@@ -8652,7 +8726,7 @@ Map<String, Object> confluenceSpaces(ApplicationLinkRequestFactory factory) {
 /* ---- Minimal report ----------------------------------------------------------
  *
  * The reduced report: per project the columns of the requirement, for the
- * one-row project page and the summary on the overview (see MinimalReport). It is
+ * minimal table on the selected overview page (see MinimalReport). It is
  * the ONLY place in this endpoint that reads issue data, and it reads exactly two
  * values: the issue count, through the IssueManager call jiraDCappFootprint uses,
  * and the latest update, through one search with one result.
@@ -8699,6 +8773,7 @@ Map<String, Object> minimalContext() {
         context.put("searchService", null)
     }
     context.put("user", ComponentAccessor.getJiraAuthenticationContext().getLoggedInUser())
+    context.put("appIndex", minimalAppIndex())
     return context
 }
 
@@ -8753,6 +8828,296 @@ Map<String, Object> minimalLastUpdate(String projectKey, Map<String, Object> con
         : [value: text, state: "partial", note: "read with the issue security of the exporting administrator"] as Map<String, Object>
 }
 
+/* ---- Minimal report: app footprint per project -------------------------------
+ *
+ * The three app columns, with the attribution rules of jiraDCappFootprint and
+ * without needing it installed. Apps that are system-provided are not apps here.
+ *
+ *   App fields: distinct custom fields on the screens of the project (its issue
+ *   type screen scheme down to every tab) whose field type comes from an app. A
+ *   type key is "<plugin key>:<module key>"; the longest installed plugin key it
+ *   starts with owns it.
+ *
+ *   Workflow extensions: conditions, validators, pre and post functions in the
+ *   workflows of the project's workflow scheme that an app provides. Owner by
+ *   full.module.key (longest plugin key prefix, post functions only carry it), else
+ *   by class.name against the workflow module implementation classes, else by the
+ *   module class - the order and the reasons are recorded in the footprint.
+ *
+ *   Used apps: the apps behind both.
+ *
+ * Every scheme and every workflow is read once per request and shared between the
+ * projects that use it. The walk has its own time budget; a project past it says
+ * "not measured" instead of a number. */
+
+Map<String, Object> minimalAppIndex() {
+    Map<String, Object> index = new LinkedHashMap<String, Object>()
+    Set<String> pluginKeys = new LinkedHashSet<String>()
+    Map<String, String> appNames = new HashMap<String, String>()
+    Map<String, String> implementationOwners = new HashMap<String, String>()
+    Map<String, String> moduleOwners = new HashMap<String, String>()
+    index.put("pluginKeys", pluginKeys)
+    index.put("appNames", appNames)
+    index.put("implementationOwners", implementationOwners)
+    index.put("moduleOwners", moduleOwners)
+    index.put("screens", new HashMap<String, Map<String, Object>>())
+    index.put("workflows", new HashMap<String, Map<String, Object>>())
+    index.put("deadline", Long.valueOf(System.currentTimeMillis() + 120000L))
+    index.put("problem", null)
+    try {
+        Object metadata = null
+        try {
+            metadata = ComponentAccessor.getComponent(Class.forName("com.atlassian.plugin.metadata.PluginMetadataManager"))
+        } catch (Throwable ignored) {
+            metadata = null
+        }
+        Object plugins = Pc.duck(ComponentAccessor.getPluginAccessor(), "getPlugins", null)
+        if (!(plugins instanceof Collection)) {
+            index.put("problem", "the installed apps could not be listed")
+            return index
+        }
+        for (Object plugin : (Collection) plugins) {
+            String key = Pc.text(Pc.duck(plugin, "getKey", null))
+            if (key == null) {
+                continue
+            }
+            pluginKeys.add(key)
+            if (Pc.duck(metadata, "isSystemProvided", plugin) != Boolean.TRUE) {
+                String name = Pc.text(Pc.duck(plugin, "getName", null))
+                appNames.put(key, name == null ? key : name)
+            }
+            Object descriptors = Pc.duck(plugin, "getModuleDescriptors", null)
+            if (!(descriptors instanceof Collection)) {
+                continue
+            }
+            for (Object descriptor : (Collection) descriptors) {
+                Object implementation = Pc.duck(descriptor, "getImplementationClass", null)
+                if (implementation instanceof Class) {
+                    String className = ((Class) implementation).getName()
+                    if (!className.startsWith("java.") && !className.startsWith("groovy.")) {
+                        implementationOwners.putIfAbsent(className, key)
+                    }
+                }
+                Object moduleClass = Pc.duck(descriptor, "getModuleClass", null)
+                if (moduleClass instanceof Class) {
+                    String className = ((Class) moduleClass).getName()
+                    if (!className.startsWith("java.") && !className.startsWith("groovy.")) {
+                        moduleOwners.putIfAbsent(className, key)
+                    }
+                }
+            }
+        }
+    } catch (Throwable error) {
+        index.put("problem", "the installed apps could not be read (" + Cx.errorDetail(error) + ")")
+    }
+    return index
+}
+
+/* The installed plugin key a full key starts with, the longest one winning. */
+String minimalOwner(String fullKey, Set<String> pluginKeys, String separator) {
+    if (fullKey == null) {
+        return null
+    }
+    String best = null
+    for (String key : pluginKeys) {
+        if (fullKey.startsWith(key + separator) && (best == null || key.length() > best.length())) {
+            best = key
+        }
+    }
+    return best
+}
+
+/* App custom fields on the screens of one issue type screen scheme: field id to owning app. */
+Map<String, String> minimalScreenFields(IssueTypeScreenScheme scheme, Map<String, Object> index) {
+    Set<String> pluginKeys = (Set<String>) index.get("pluginKeys")
+    Map<String, String> appNames = (Map<String, String>) index.get("appNames")
+    Map<String, String> found = new LinkedHashMap<String, String>()
+    Set<String> fieldIds = new LinkedHashSet<String>()
+    for (IssueTypeScreenSchemeEntity entity : scheme.getEntities()) {
+        FieldScreenScheme screenScheme = entity.getFieldScreenScheme()
+        if (screenScheme == null) {
+            continue
+        }
+        for (FieldScreenSchemeItem item : screenScheme.getFieldScreenSchemeItems()) {
+            FieldScreen screen = item.getFieldScreen()
+            if (screen == null) {
+                continue
+            }
+            for (FieldScreenTab tab : screen.getTabs()) {
+                for (FieldScreenLayoutItem layoutItem : tab.getFieldScreenLayoutItems()) {
+                    String fieldId = layoutItem.getFieldId()
+                    if (fieldId != null && fieldId.startsWith("customfield_")) {
+                        fieldIds.add(fieldId)
+                    }
+                }
+            }
+        }
+    }
+    CustomFieldManager fields = ComponentAccessor.getCustomFieldManager()
+    for (String fieldId : fieldIds) {
+        CustomField field = fields.getCustomFieldObject(fieldId)
+        CustomFieldType type = field == null ? null : field.getCustomFieldType()
+        String owner = minimalOwner(type == null ? null : type.getKey(), pluginKeys, ":")
+        if (owner != null && appNames.containsKey(owner)) {
+            found.put(fieldId, appNames.get(owner))
+        }
+    }
+    return found
+}
+
+/* Every condition, validator and function entry of one workflow descriptor. */
+void minimalEntries(Object node, List<Object> sink, int depth) {
+    if (node == null || depth > 12) {
+        return
+    }
+    for (String chain : ["getValidators", "getPreFunctions", "getPostFunctions"]) {
+        Object entries = Pc.duck(node, chain, null)
+        if (entries instanceof List) {
+            sink.addAll((List) entries)
+        }
+    }
+    Object conditions = Pc.duck(node, "getConditions", null)
+    if (conditions instanceof List) {
+        for (Object member : (List) conditions) {
+            if (Pc.duck(member, "getConditions", null) instanceof List) {
+                minimalEntries(member, sink, depth + 1)
+            } else if (member != null) {
+                sink.add(member)
+            }
+        }
+    }
+    minimalEntries(Pc.duck(Pc.duck(node, "getRestriction", null), "getConditionsDescriptor", null), sink, depth + 1)
+    minimalEntries(Pc.duck(node, "getUnconditionalResult", null), sink, depth + 1)
+    Object conditional = Pc.duck(node, "getConditionalResults", null)
+    if (conditional instanceof List) {
+        for (Object result : (List) conditional) {
+            minimalEntries(result, sink, depth + 1)
+        }
+    }
+}
+
+/* App extension points of one workflow: their number and the apps behind them. */
+Map<String, Object> minimalWorkflow(JiraWorkflow workflow, Map<String, Object> index) {
+    Set<String> pluginKeys = (Set<String>) index.get("pluginKeys")
+    Map<String, String> appNames = (Map<String, String>) index.get("appNames")
+    Map<String, String> implementationOwners = (Map<String, String>) index.get("implementationOwners")
+    Map<String, String> moduleOwners = (Map<String, String>) index.get("moduleOwners")
+    List<Object> entries = new ArrayList<Object>()
+    for (Object action : workflow.getAllActions()) {
+        minimalEntries(action, entries, 0)
+    }
+    Object descriptor = workflow.getDescriptor()
+    Object steps = Pc.duck(descriptor, "getSteps", null)
+    if (steps instanceof List) {
+        for (Object step : (List) steps) {
+            for (String chain : ["getPreFunctions", "getPostFunctions"]) {
+                Object stepEntries = Pc.duck(step, chain, null)
+                if (stepEntries instanceof List) {
+                    entries.addAll((List) stepEntries)
+                }
+            }
+        }
+    }
+    minimalEntries(Pc.duck(descriptor, "getGlobalConditions", null), entries, 0)
+    int count = 0
+    Set<String> apps = new TreeSet<String>(String.CASE_INSENSITIVE_ORDER)
+    for (Object entry : entries) {
+        Object args = Pc.duck(entry, "getArgs", null)
+        if (!(args instanceof Map)) {
+            continue
+        }
+        Object fullKey = ((Map) args).get("full.module.key")
+        Object className = ((Map) args).get("class.name")
+        /* full.module.key is plugin key and module key with no separator. */
+        String owner = minimalOwner(fullKey == null ? null : fullKey.toString(), pluginKeys, "")
+        if (owner == null && className != null) {
+            owner = implementationOwners.get(className.toString())
+            if (owner == null) {
+                owner = moduleOwners.get(className.toString())
+            }
+        }
+        if (owner != null && appNames.containsKey(owner)) {
+            count++
+            apps.add(appNames.get(owner))
+        }
+    }
+    Map<String, Object> result = new LinkedHashMap<String, Object>()
+    result.put("count", Integer.valueOf(count))
+    result.put("apps", apps)
+    return result
+}
+
+/* The three app columns of one project. */
+void minimalApps(Project project, Map<String, Object> context, Map<String, Object> row) {
+    Map<String, Object> index = (Map<String, Object>) context.get("appIndex")
+    String problem = index == null ? "the app index was not built" : Pc.text(index.get("problem"))
+    if (problem == null && System.currentTimeMillis() > ((Long) index.get("deadline")).longValue()) {
+        problem = "the 120 s budget of the app scan was used up before this project"
+    }
+    if (problem != null) {
+        Map<String, Object> missing = [state: "notMeasured", note: problem] as Map<String, Object>
+        row.put("apps", missing)
+        row.put("appFields", missing)
+        row.put("workflowExtensions", missing)
+        return
+    }
+    Set<String> apps = new TreeSet<String>(String.CASE_INSENSITIVE_ORDER)
+    Map<String, Object> fieldsValue
+    try {
+        IssueTypeScreenScheme scheme = ComponentAccessor.getIssueTypeScreenSchemeManager().getIssueTypeScreenScheme(project)
+        Map<String, Map<String, Object>> screens = (Map<String, Map<String, Object>>) index.get("screens")
+        String schemeKey = scheme == null ? "" : String.valueOf(scheme.getId())
+        if (!screens.containsKey(schemeKey)) {
+            screens.put(schemeKey, [fields: scheme == null ? new LinkedHashMap<String, String>() : minimalScreenFields(scheme, index)] as Map<String, Object>)
+        }
+        Map<String, String> fields = (Map<String, String>) screens.get(schemeKey).get("fields")
+        apps.addAll(fields.values())
+        fieldsValue = [value: String.valueOf(fields.size())] as Map<String, Object>
+    } catch (Throwable error) {
+        fieldsValue = [state: "failed", note: Cx.errorDetail(error)] as Map<String, Object>
+    }
+    Map<String, Object> workflowsValue
+    try {
+        AssignableWorkflowScheme scheme = ComponentAccessor.getComponent(WorkflowSchemeManager).getWorkflowSchemeObj(project)
+        Set<String> names = new LinkedHashSet<String>()
+        if (scheme != null) {
+            Map<String, String> mappings = scheme.getMappings()
+            if (mappings != null) {
+                names.addAll(mappings.values())
+            }
+            String fallback = scheme.getActualDefaultWorkflow()
+            if (fallback != null) {
+                names.add(fallback)
+            }
+        }
+        WorkflowManager workflowManager = ComponentAccessor.getComponent(WorkflowManager)
+        Map<String, Map<String, Object>> cache = (Map<String, Map<String, Object>>) index.get("workflows")
+        int count = 0
+        for (String name : names) {
+            if (name == null) {
+                continue
+            }
+            if (!cache.containsKey(name)) {
+                JiraWorkflow workflow = workflowManager.getWorkflow(name)
+                cache.put(name, workflow == null ? ([count: Integer.valueOf(0), apps: new TreeSet<String>()] as Map<String, Object>)
+                    : minimalWorkflow(workflow, index))
+            }
+            Map<String, Object> walked = cache.get(name)
+            count += ((Integer) walked.get("count")).intValue()
+            apps.addAll((Set<String>) walked.get("apps"))
+        }
+        workflowsValue = [value: String.valueOf(count)] as Map<String, Object>
+    } catch (Throwable error) {
+        workflowsValue = [state: "failed", note: Cx.errorDetail(error)] as Map<String, Object>
+    }
+    boolean complete = fieldsValue.get("state") == null && workflowsValue.get("state") == null
+    row.put("apps", apps.isEmpty() && complete ? ([state: "absent"] as Map<String, Object>)
+        : ([value: new ArrayList<String>(apps), state: complete ? "read" : "partial",
+            note: complete ? null : "a part of the app scan failed"] as Map<String, Object>))
+    row.put("appFields", fieldsValue)
+    row.put("workflowExtensions", workflowsValue)
+}
+
 Map<String, Object> minimalRow(Project project, Map<String, Object> context) {
     Map<String, Object> row = new LinkedHashMap<String, Object>()
     row.put("key", [value: project.getKey()])
@@ -8792,6 +9157,7 @@ Map<String, Object> minimalRow(Project project, Map<String, Object> context) {
         return [value: String.valueOf(InvokerHelper.invokeMethod(issueManager, "getIssueCountForProject", [project.getId()] as Object[]))]
     })
     row.put("lastUpdate", minimalRead { -> minimalLastUpdate(project.getKey(), context) })
+    minimalApps(project, context, row)
     return row
 }
 
@@ -9106,7 +9472,8 @@ Map<String, Object> confluenceSearchPages(ApplicationLinkRequestFactory factory,
  * "no such page", which the caller would answer by creating a duplicate. The
  * 401 hint about a Jira user without a Confluence account arrives through
  * confluenceCall, the same path the export itself uses. */
-Map<String, Object> confluenceParentByTitle(ApplicationLinkRequestFactory factory, String spaceKey, String title) {
+Map<String, Object> confluenceParentByTitle(ApplicationLinkRequestFactory factory, String spaceKey, String title,
+                                            String containerBody = Cx.PARENT_BODY) {
     Map<String, Object> result = new LinkedHashMap<String, Object>()
     result.put("ok", Boolean.FALSE)
     result.put("error", null)
@@ -9140,7 +9507,7 @@ Map<String, Object> confluenceParentByTitle(ApplicationLinkRequestFactory factor
     spacePayload.put("key", spaceKey)
 
     Map<String, Object> storageBody = new LinkedHashMap<String, Object>()
-    storageBody.put("value", Cx.PARENT_BODY)
+    storageBody.put("value", containerBody)
     storageBody.put("representation", "storage")
 
     Map<String, Object> bodyPayload = new LinkedHashMap<String, Object>()
@@ -9463,7 +9830,7 @@ projectConfig(
     }
 
     if (action == "links" || action == "spaces" || action == "pages" || action == "rebuild-overview" ||
-        action == "exported") {
+        action == "exported" || action == "minimal") {
         Map<String, Object> lookup = confluenceApplicationLinks()
         if (lookup.get("ok") != Boolean.TRUE) {
             return refuse(500, "link", String.valueOf(lookup.get("error")))
@@ -9554,6 +9921,123 @@ projectConfig(
          * opened and nothing is written. An overview that cannot be read, or whose
          * table this exporter would refuse to update, is refused here as well. A
          * failed read must never come back as "nothing exported yet". */
+        if (action == "minimal") {
+            /* The minimal report: the rows of the selected projects in the managed table of the
+             * overview page, read, merged and saved ONCE, then read back. No other page is written. */
+            String minimalSpace = Cx.str(request, "spaceKey", "")
+            String minimalParent = Cx.str(request, "parentPageId", "").trim()
+            String minimalParentTitle = Cx.str(request, "parentTitle", "").trim()
+            if (minimalSpace.isEmpty()) {
+                return refuse(400, "minimal", "No space was selected.")
+            }
+            String minimalSpaceProblem = Cx.spaceKeyProblem(minimalSpace)
+            if (!minimalSpaceProblem.isEmpty()) {
+                return refuse(400, "minimal", "The space key \"" + minimalSpace + "\" cannot be used: " + minimalSpaceProblem + ".")
+            }
+            if (minimalParent.isEmpty() == minimalParentTitle.isEmpty()) {
+                return refuse(400, "minimal", "Pick the overview page, or type the title of a new one, exactly one of the two. " +
+                    "The minimal report writes only that page. Nothing is written.")
+            }
+            List<String> minimalKeys = new ArrayList<String>()
+            Object rawKeys = request.get("keys")
+            if (rawKeys instanceof List) {
+                for (Object rawKey : (List) rawKeys) {
+                    String key = Pc.text(rawKey)
+                    if (key != null && !minimalKeys.contains(key)) {
+                        minimalKeys.add(key)
+                    }
+                }
+            }
+            if (minimalKeys.isEmpty()) {
+                return refuse(400, "minimal", "No project was selected. Nothing is written.")
+            }
+            if (minimalKeys.size() > MinimalReport.MAX_KEYS) {
+                return refuse(400, "minimal", "More than " + MinimalReport.MAX_KEYS + " projects in one request. Nothing is written.")
+            }
+            String minimalParentAction = "found"
+            String minimalParentName = minimalParentTitle
+            if (!minimalParent.isEmpty()) {
+                if (!(minimalParent ==~ /[0-9]+/)) {
+                    return refuse(400, "minimal", "The overview page ID \"" + minimalParent + "\" is not a number.")
+                }
+                Map<String, Object> picked = confluenceParentPage(targetFactory, minimalParent)
+                if (picked.get("ok") != Boolean.TRUE) {
+                    return refuse(400, "minimal", String.valueOf(picked.get("error")))
+                }
+                if (!minimalSpace.equalsIgnoreCase(String.valueOf(picked.get("spaceKey")))) {
+                    return refuse(400, "minimal", "The overview page " + minimalParent + " sits in space \"" +
+                        String.valueOf(picked.get("spaceKey")) + "\", not in \"" + minimalSpace + "\". Nothing is written.")
+                }
+                minimalParentName = picked.get("title") == null ? null : picked.get("title").toString()
+            }
+            ProjectManager minimalProjects = ComponentAccessor.getProjectManager()
+            Map<String, Object> minimalCollect = minimalContext()
+            List<Map<String, Object>> minimalItems = new ArrayList<Map<String, Object>>()
+            List<String> minimalMissing = new ArrayList<String>()
+            for (String key : minimalKeys) {
+                Project project = minimalProjects.getProjectObjByKeyIgnoreCase(key)
+                if (project == null) {
+                    minimalMissing.add(key)
+                } else {
+                    minimalItems.add(minimalRow(project, minimalCollect))
+                }
+            }
+            if (minimalItems.isEmpty()) {
+                return refuse(404, "minimal", "None of the selected projects was found: " + minimalMissing.join(", ") + ". Nothing is written.")
+            }
+            /* A typed title is resolved only now, so a request refused above leaves no page behind. */
+            if (minimalParent.isEmpty()) {
+                Map<String, Object> made = confluenceParentByTitle(targetFactory, minimalSpace, minimalParentTitle, MinimalReport.PARENT_BODY)
+                if (made.get("ok") != Boolean.TRUE) {
+                    return refuse(500, "parent", String.valueOf(made.get("error")) + " Nothing is written.")
+                }
+                minimalParent = String.valueOf(made.get("id"))
+                minimalParentAction = made.get("created") == Boolean.TRUE ? "created" : "found"
+            }
+            Set<String> minimalExisting = minimalExistingKeys(minimalProjects)
+            String minimalBase = null
+            try {
+                minimalBase = ComponentAccessor.getApplicationProperties().getJiraBaseUrl()
+            } catch (Exception ignored) {
+                minimalBase = null
+            }
+            final String minimalPage = minimalParent
+            final String minimalBaseUrl = minimalBase
+            Map<String, Object> minimalTable = MinimalReport.update(minimalPage, minimalSpace,
+                { -> confluenceOverviewRead(targetFactory, minimalPage) },
+                { Map page, String storage -> confluenceOverviewWrite(targetFactory, page, storage) },
+                { String body -> MinimalReport.merge(body, "jira", minimalBaseUrl, minimalItems, minimalExisting) },
+                { String body -> MinimalReport.unconfirmed(body, "jira", minimalBaseUrl, minimalItems) })
+            List<String> minimalWarnings = new ArrayList<String>()
+            if (minimalExisting == null) {
+                minimalWarnings.add("The project list could not be read completely, so no row was marked as no longer existing.")
+            }
+            if (!minimalMissing.isEmpty()) {
+                minimalWarnings.add("Not found, so not written: " + minimalMissing.join(", ") + ".")
+            }
+            Map<String, Object> minimalPayload = new LinkedHashMap<String, Object>()
+            minimalPayload.put("ok", Boolean.valueOf(minimalTable.get("state") != "failed"))
+            minimalPayload.put("written", Boolean.valueOf(minimalTable.get("state") == "updated"))
+            minimalPayload.put("action", "minimal")
+            minimalPayload.put("table", minimalTable)
+            minimalPayload.put("error", minimalTable.get("state") == "failed" ? minimalTable.get("reason") : null)
+            minimalPayload.put("rows", Integer.valueOf(minimalItems.size()))
+            List<String> writtenKeys = new ArrayList<String>()
+            for (Map<String, Object> item : minimalItems) {
+                writtenKeys.add(MinimalReport.shown(item.get("key")))
+            }
+            minimalPayload.put("keys", writtenKeys)
+            minimalPayload.put("missing", minimalMissing)
+            minimalPayload.put("target", confluenceLinkName(targetLink))
+            minimalPayload.put("spaceKey", minimalSpace)
+            minimalPayload.put("parentPageId", minimalPage)
+            minimalPayload.put("parentTitle", minimalParentName)
+            minimalPayload.put("parentAction", minimalParentAction)
+            minimalPayload.put("parentPageUrl", confluencePageUrl(targetLink, minimalPage))
+            minimalPayload.put("warnings", minimalWarnings)
+            return answer(minimalPayload)
+        }
+
         if (action == "exported") {
             String exportedSpace = Cx.str(request, "spaceKey", "")
             String exportedParent = Cx.str(request, "parentPageId", "").trim()
@@ -9575,9 +10059,15 @@ projectConfig(
                     exportedPageSpace + "\", not in \"" + exportedSpace + "\".")
             }
             List<Map<String, String>> exportedRows
+            List<String> minimalKeys = new ArrayList<String>()
             try {
-                exportedRows = ConfigOverview.exported(String.valueOf(exportedPage.get("storage")),
-                    Cx.str(request, "mode", "full") == "minimal" ? MinimalReport.overviewProduct("jira") : "jira", exportedPageSpace)
+                if (Cx.str(request, "mode", "full") == "minimal") {
+                    /* The minimal report has no export pages: its table names the project keys it holds. */
+                    minimalKeys = MinimalReport.keys(String.valueOf(exportedPage.get("storage")), "jira")
+                    exportedRows = new ArrayList<Map<String, String>>()
+                } else {
+                    exportedRows = ConfigOverview.exported(String.valueOf(exportedPage.get("storage")), "jira", exportedPageSpace)
+                }
             } catch (IllegalArgumentException refusal) {
                 return refuse(409, "exported", "The overview table on page " + exportedParent +
                     " cannot be read: " + refusal.getMessage())
@@ -9590,6 +10080,7 @@ projectConfig(
             exportedPayload.put("parentPageId", exportedParent)
             exportedPayload.put("parentTitle", exportedPage.get("title"))
             exportedPayload.put("exports", exportedRows)
+            exportedPayload.put("minimalKeys", minimalKeys)
             return answer(exportedPayload)
         }
 
@@ -9726,14 +10217,7 @@ projectConfig(
      * this report's own shape. It asked for "apps" until now, which is the shape of
      * the sibling app-footprint endpoint this transport was taken from: every
      * export refused with a sentence about apps that this report has never had. */
-    /* mode "minimal" is the reduced report: its payload is the GET ?report=minimal JSON of
-     * one project, and it writes the one-row project page and the summary overview. */
-    boolean minimalMode = Cx.str(request, "mode", "full").toLowerCase(Locale.ROOT) == "minimal"
-    if (minimalMode && Cx.sub(request, "minimal").isEmpty()) {
-        return refuse(400, "validate", "The minimal export payload carries no values. " +
-            "Nothing is written. Reload the project list and press the button again.")
-    }
-    if (!minimalMode && Cx.rowsOf(request, "sections").isEmpty()) {
+    if (Cx.rowsOf(request, "sections").isEmpty()) {
         return refuse(400, "validate", "The export payload carries no configuration sections. " +
             "Nothing is written. Reload the report and press the button again.")
     }
@@ -9805,25 +10289,13 @@ projectConfig(
 
     RemarkRead read = new RemarkRead()
     boolean pageExists = existing.get("found") == Boolean.TRUE
-    Map<String, String> pageTopics = new LinkedHashMap<String, String>()
 
     if (pageExists) {
         if (existing.get("storageRead") != Boolean.TRUE) {
             return refuse(409, "read", "A page with this title already exists in \"" + spaceKey + "\" but its body did " +
                 "not arrive over the application link. Nothing is written, so no remark can be lost.")
         }
-        if (minimalMode) {
-            /* The topics take the place of the remarks, with the same fail-closed gate. */
-            Map<String, Object> topicRead = MinimalReport.parse(String.valueOf(existing.get("storage")), "jira")
-            if (topicRead.get("ok") == Boolean.TRUE) {
-                read.outcome = RemarkRead.PARSED
-                pageTopics = (Map<String, String>) topicRead.get("topics")
-            } else {
-                read.fail(String.valueOf(topicRead.get("reason")))
-            }
-        } else {
-            read = Cx.parseRemarks(String.valueOf(existing.get("storage")))
-        }
+        read = Cx.parseRemarks(String.valueOf(existing.get("storage")))
         read.pageId = existing.get("id") == null ? null : existing.get("id").toString()
         read.pageVersion = ((Number) existing.get("version")).intValue()
     }
@@ -9866,48 +10338,7 @@ projectConfig(
 
     /* ---- Write ------------------------------------------------------------- */
 
-    ExportOutcome outcome
-    List<String> minimalTopics = new ArrayList<String>()
-    if (minimalMode) {
-        /* One topic set: the overview knows every topic an earlier export found, and this
-         * page is seeded with the ones it lacks. A summary that cannot be read seeds nothing
-         * and says so; the overview update below reports its own outcome. */
-        List<String> knownTopics = new ArrayList<String>()
-        String knownTopicsProblem = null
-        if (parentId != null) {
-            Map<String, Object> known = confluenceOverviewRead(factory, parentId)
-            try {
-                if (known.get("ok") == Boolean.TRUE) {
-                    knownTopics = MinimalReport.knownTopics(String.valueOf(known.get("storage")), "jira", spaceKey)
-                } else {
-                    throw new IllegalStateException(String.valueOf(known.get("error")))
-                }
-            } catch (Exception error) {
-                knownTopics = new ArrayList<String>()
-                knownTopicsProblem = "The topics of the overview could not be read (" + Cx.errorDetail(error) +
-                    "), so this page was not seeded with them."
-            }
-        }
-        String jiraBaseUrl = null
-        try {
-            jiraBaseUrl = ComponentAccessor.getApplicationProperties().getJiraBaseUrl()
-        } catch (Exception ignored) {
-            jiraBaseUrl = Cx.str(Cx.sub(request, "instance"), "baseUrl", null)
-        }
-        Map<String, Object> rendered = MinimalReport.render("jira", jiraBaseUrl, Cx.sub(request, "minimal"), pageTopics,
-            knownTopics, Pc.timestamp(), Pc.VERSION)
-        outcome = new ExportOutcome()
-        outcome.storage = (String) rendered.get("storage")
-        outcome.sections = (List<Map<String, String>>) rendered.get("sections")
-        minimalTopics = (List<String>) rendered.get("topics")
-        outcome.remarksRead = pageTopics.size()
-        outcome.remarksCarried = pageTopics.size()
-        if (knownTopicsProblem != null) {
-            outcome.warnings.add(knownTopicsProblem)
-        }
-    } else {
-        outcome = Cx.render(request, read)
-    }
+    ExportOutcome outcome = Cx.render(request, read)
 
     /* What this run does about the position. A parent named in this run is carried
      * out even when the report page already exists - that is the defect this fixes,
@@ -9950,27 +10381,17 @@ projectConfig(
 
     Map<String, Object> projectIdentity = Cx.sub(request, "project")
     String overviewLabel = Cx.str(projectIdentity, "name", Cx.str(projectIdentity, "key", title))
-    /* The minimal export keeps its own summary table and marks the rows of projects this
-     * instance no longer holds. Without a complete key list nothing is marked. */
-    Set<String> existingKeys = minimalMode ? minimalExistingKeys(ComponentAccessor.getProjectManager()) : null
-    if (minimalMode && existingKeys == null) {
-        outcome.warnings.add("The project list could not be read completely, so no overview row was marked as no longer existing.")
-    }
-    Map overview = OverviewExport.maintain(minimalMode ? MinimalReport.overviewProduct("jira") : "jira", parentId, pageId, title,
-        spaceKey, overviewLabel, outcome.sections,
+    Map overview = OverviewExport.maintain("jira", parentId, pageId, title, spaceKey, overviewLabel,
+        outcome.sections,
         { -> confluenceOverviewRead(factory, parentId) },
-        { Map page, String storage -> confluenceOverviewWrite(factory, page, storage) },
-        minimalMode ? { String merged -> MinimalReport.markGone(merged, "jira", spaceKey, existingKeys) } : null)
+        { Map page, String storage -> confluenceOverviewWrite(factory, page, storage) })
 
     /* The detail page is written, so the export goes into the log, whatever the
      * overview did. A log that cannot be written is reported with the export; it
      * never turns a written page into a failed export. */
     Map<String, Object> exportLog
     String loggedKey = Cx.str(projectIdentity, "key", "")
-    if (minimalMode) {
-        /* The log marks full exports in the picker; a minimal page is not one. */
-        exportLog = [state: "skipped", reason: "The minimal report is not recorded in the export log."] as Map<String, Object>
-    } else if (loggedKey.isEmpty()) {
+    if (loggedKey.isEmpty()) {
         exportLog = [state: "failed", reason: "The export named no project key, so it was not logged."] as Map<String, Object>
     } else {
         try {
@@ -9995,8 +10416,6 @@ projectConfig(
     response.put("ok", Boolean.TRUE)
     response.put("written", Boolean.TRUE)
     response.put("action", pageExists ? "updated" : "created")
-    response.put("mode", minimalMode ? "minimal" : "full")
-    response.put("topics", minimalTopics)
     response.put("target", confluenceLinkName(link))
     response.put("spaceKey", spaceKey)
     response.put("title", title)

@@ -62,7 +62,7 @@ class Store {
         cache[id]
     }
     void save(Page page, Page original = null) {
-        boolean overview = page.body.contains('cfcon-overview-confluence-start')
+        boolean overview = page.body.contains('cfcon-overview-confluence-start') || page.body.contains('cfcon-minimal-confluence-start')
         if (page.id != 0 && (page.hibernateVersion != pages[page.id].hibernateVersion ||
                 (overview && conflictOnOverview))) {
             rollbackOnly = true
@@ -132,7 +132,12 @@ class Cw {
     static Map instanceIdentity() { [baseUrl: 'https://example.invalid', title: 'Synthetic', confluenceVersion: 'synthetic'] }
     static String pageUrl(String base, String id) { base + '/pages/' + id }
 }
-class Db { static String why(Throwable error) { error.message } }
+class Db {
+    static Object factoryObject = null
+    static String why(Throwable error) { error.message }
+    static Map factory() { [factory: factoryObject] }
+    static Object withConnection(Object factory, Closure body) { body.call(null) }
+}
 class TestResponse extends LinkedHashMap {
     int getStatus() { containsKey('status') ? ((Number) get('status')).intValue() : 200 }
 }

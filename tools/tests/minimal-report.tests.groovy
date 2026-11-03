@@ -11,138 +11,141 @@ String product = binding.getVariable('product')
 String other = product == 'jira' ? 'confluence' : 'jira'
 String base = product == 'jira' ? 'https://jira.example/jira/' : 'https://wiki.example/confluence'
 List<List<String>> columns = minimal.columns(product)
-String keyLabel = columns[0][1]
 String expectedHref = product == 'jira' ? 'https://jira.example/jira/projects/APL/issues' : 'https://wiki.example/confluence/display/APL/'
-
-Map item = [key: [value: 'APL'], name: [value: 'ART & Plattform'], lead: [value: 'Pius H\u00f6ltschi'],
-            admins: [value: ['jira-admins', 'Daniel Tobler']], category: [value: 'SWEP-Streams'],
-            issues: [value: '7226'], lastUpdate: [value: '30.10.2026'],
-            description: [value: 'Bereich f\u00fcr ART <Plattform>'], pages: [value: '412'],
-            apps: [value: ['Draw.io', 'Gliffy']], appMacros: [value: '3', state: 'partial'],
-            userMacros: [state: 'notMeasured', note: 'the content index could not be read']]
-
-/* ---- Page rendering -------------------------------------------------------- */
-Map first = minimal.render(product, base, item, [:], [], '2026-11-03 10:00', '0.6')
-String page = first.storage
-verify(page.contains(minimal.marker(product)), 'the page carries the minimal marker')
-verify(!page.contains(minimal.marker(other)), 'the page does not carry the other product\'s marker')
-verify(page.contains('<a href="' + expectedHref + '">APL</a>'), 'the key links to the project or space itself')
-verify(page.contains('ART &amp; Plattform'), 'values are escaped')
-columns.each { verify(page.contains('<th>' + cx.esc(it[1]) + '</th>'), 'the page carries the generated column ' + it[1]) }
-if (product == 'jira') {
-    verify(page.contains('jira-admins, Daniel Tobler'), 'administrators are listed as users and groups')
-} else {
-    verify(page.contains('3 *'), 'a lower bound carries its asterisk')
-    verify(page.contains('not measured: the content index could not be read'), 'an unmeasured value says so and is not zero')
-    verify(page.contains('Draw.io, Gliffy'), 'used apps are listed')
+def item = { String key, String name, String category ->
+    [key: [value: key], name: [value: name], lead: [value: 'Pius H\u00f6ltschi'], admins: [value: ['jira-admins', 'Daniel Tobler']],
+     category: [value: category], issues: [value: '7226'], lastUpdate: [value: '30.10.2026'],
+     apps: [value: ['Tempo', 'ScriptRunner']], appFields: [value: '4'], workflowExtensions: [value: '7', state: 'partial'],
+     description: [value: 'Bereich f\u00fcr ART <Plattform>'], pages: [value: '412'],
+     appMacros: [value: '3', state: 'partial'], userMacros: [state: 'notMeasured', note: 'the content index could not be read']]
 }
-verify(first.sections.every { it.key != minimal.COLUMN + 'name' }, 'the name is the overview identity column, not a value column')
-verify(first.topics == ['Themengebiet 1', 'Themengebiet 2'], 'a page starts with the default topics while none is known')
-verify(page.contains('<th>Themengebiet 1</th><th>Themengebiet 2</th></tr>'), 'the default topics are columns on the page')
-verify(minimal.title(product, 'APL') == (product == 'jira' ? 'Jira project overview - APL' : 'Confluence space overview - APL'),
-    'the default title differs from the full export title')
+def rowOf = { String body, String key ->
+    Map model = minimal.read(body, product)
+    int keyColumn = model.ids.key
+    model.rows.find { minimal.rowKey(it[keyColumn], product) == key }
+}
+def columnOf = { String body, String heading ->
+    Map model = minimal.read(body, product)
+    model.header.findIndexOf { overview.text(it) == heading }
+}
+
+/* ---- A new table on the overview page --------------------------------------- */
+String parent = '<p>KEEP intro &amp; notes</p><table><tbody><tr><td>KEEP other table</td></tr></tbody></table>'
+String first = minimal.merge(parent, product, base, [item('APL', 'ART & Plattform', 'SWEP-Streams')], ['APL', 'OLD'] as Set)
+verify(first.startsWith(parent), 'content outside the minimal table is kept')
+verify(first.contains(cx.esc(minimal.NOTE)), 'the table says which columns are generated and which are kept')
+Map model = minimal.read(first, product)
+verify(model.header.size() == columns.size() + 2, 'a new table carries every generated column and the two default topics')
+verify(model.header.collect { overview.text(it) } == columns.collect { it[1] } + ['Themengebiet 1', 'Themengebiet 2'],
+    'generated headings in order, then Themengebiet 1 and 2')
+verify(model.rows.size() == 1 && minimal.keys(first, product) == ['APL'], 'one row per object, keyed by its key')
+List<String> apl = rowOf(first, 'APL')
+verify(apl[0].contains('<a href="' + expectedHref + '">APL</a>'), 'the key links to the project or space itself')
+verify(first.contains('ART &amp; Plattform'), 'values are escaped')
+verify(apl[-1] == '' && apl[-2] == '', 'the topic cells of a new row are empty')
+if (product == 'jira') {
+    verify(first.contains('jira-admins, Daniel Tobler') && first.contains('Tempo, ScriptRunner'), 'lists are written as a list')
+    verify(first.contains('>7 *<'), 'a lower bound carries its asterisk')
+} else {
+    verify(first.contains('3 *') && first.contains('not measured: the content index could not be read'), 'lower bound and not measured are stated')
+}
+verify(minimal.read(parent, product).header == null && minimal.keys(parent, product) == [], 'a page without the table holds no key')
+verify(minimal.unconfirmed(first, product, null, [item('APL', 'ART & Plattform', 'SWEP-Streams')]) == [], 'the written row reads back')
+verify(minimal.unconfirmed(first, product, null, [item('APL', 'ART & Plattform', 'Other')]) == ['APL'], 'a row with other values is not confirmed')
+verify(minimal.unconfirmed(parent, product, null, [item('APL', 'A', 'B')]) == ['APL'], 'a missing table confirms nothing')
+
+/* ---- Administrators work in the table ------------------------------------------ */
+String lozenge = '<ac:structured-macro ac:name="status" ac:schema-version="1" ac:macro-id="m-1"><ac:parameter ac:name="colour">Green</ac:parameter><ac:parameter ac:name="title">KI</ac:parameter></ac:structured-macro>'
+String edited = first.replace('<th>Themengebiet 1</th>', '<th><p><strong>KI-Governance</strong></p></th>')
+    .replace('<td></td><td></td></tr>', '<td><p>' + lozenge + ' Pilot</p></td><td>Owner: Tobler</td></tr>')
+    .replace('</th></tr>', '</th><th>Security</th></tr>').replace('</td></tr>', '</td><td>ISMS</td></tr>')
+    .replace('<ac:structured-macro ac:name="anchor">', '<ac:structured-macro ac:name="anchor" ac:schema-version="1" ac:macro-id="a-1">')
+verify(minimal.read(edited, product).rows.size() == 1, 'an edited table with renamed and added topic columns still reads')
+String second = minimal.merge(edited, product, base, [item('APL', 'ART Plattform', 'Neue Kategorie'), item('KIGOV', 'KI Governance', 'safe')], ['APL', 'KIGOV'] as Set)
+List<String> aplAgain = rowOf(second, 'APL')
+verify(aplAgain.contains('<p>' + lozenge + ' Pilot</p>') && aplAgain.contains('Owner: Tobler') && aplAgain.contains('ISMS'),
+    'every topic cell of an existing row is kept verbatim')
+verify(second.contains('<th><p><strong>KI-Governance</strong></p></th>') && second.contains('<th>Security</th>'),
+    'renamed and added topic headings are kept')
+verify(second.contains('Neue Kategorie') && !second.contains('SWEP-Streams'), 'generated cells are rewritten')
+List<String> kigov = rowOf(second, 'KIGOV')
+verify(kigov != null && kigov[columnOf(second, 'Security')] == '' && kigov[columnOf(second, 'Themengebiet 2')] == '',
+    'a new object gets a row with empty topic cells')
+verify(minimal.keys(second, product) == ['APL', 'KIGOV'], 'existing rows keep their place, new ones are appended')
+String third = minimal.merge(second, product, base, [item('KIGOV', 'KI Governance', 'safe')], ['APL', 'KIGOV'] as Set)
+verify(rowOf(third, 'APL') == rowOf(second, 'APL'), 'a row that is not exported is left as it is')
+
+/* Columns moved by an administrator stay where they were put. */
+Map moved = minimal.read(third, product)
+List<Integer> order = (0..<moved.header.size()).toList()
+Collections.swap(order, 1, moved.header.size() - 1)
+def swapRow = { List<String> cells -> order.collect { cells[it] } }
+String movedBody = moved.before + minimal.marker(product, 'start') + '<table><tbody><tr>' + swapRow(moved.header).collect { '<th>' + it + '</th>' }.join('') + '</tr>' +
+    moved.rows.collect { '<tr>' + swapRow(it).collect { c -> '<td>' + c + '</td>' }.join('') + '</tr>' }.join('') + '</tbody></table>' + minimal.marker(product, 'end') + moved.after
+String afterMove = minimal.merge(movedBody, product, base, [item('APL', 'ART Plattform', 'Wieder neu')], ['APL', 'KIGOV'] as Set)
+verify(overview.text(minimal.read(afterMove, product).header[1]) == 'Security' && afterMove.contains('Wieder neu'),
+    'a moved column keeps its position and the generated cell is still found by its anchor')
+
+/* ---- Objects that no longer exist --------------------------------------------- */
+String marked = minimal.merge(third, product, base, [item('APL', 'ART Plattform', 'Neue Kategorie')], ['APL'] as Set)
+verify(rowOf(marked, 'KIGOV')[0].contains(minimal.GONE) && !rowOf(marked, 'APL')[0].contains(minimal.GONE), 'a missing object keeps its row and is marked')
+verify(rowOf(marked, 'KIGOV').contains('') , 'its topics stay')
+String again = minimal.merge(marked, product, base, [], ['APL'] as Set)
+verify(again.split(java.util.regex.Pattern.quote(minimal.GONE), -1).length - 1 == 1, 'marking is idempotent')
+verify(!minimal.merge(marked.replace('<ac:structured-macro ac:name="status"', '<ac:structured-macro ac:macro-id="s-1" ac:name="status"'),
+    product, base, [], ['APL', 'KIGOV'] as Set).contains(minimal.GONE), 'an object that exists again is unmarked, also after the editor stamped the mark')
+verify(minimal.merge(third, product, base, [], null) == minimal.merge(third, product, base, [], ['APL', 'KIGOV'] as Set),
+    'without a complete key list nothing is marked')
+
+/* ---- Fail closed ---------------------------------------------------------------- */
+def refused = { String body -> try { minimal.read(body, product); false } catch (IllegalArgumentException expected) { true } }
+String headingOf = columns[2][1]
+verify(refused(second.replace(minimal.prefix(product) + 'col-' + columns[2][0], 'removed-anchor')), 'a generated column without its anchor is refused: ' + headingOf)
+verify(refused(second.replace('<td>Owner: Tobler</td>', '<td colspan="2">Owner: Tobler</td>')), 'merged cells are refused')
+verify(refused(second.replace('<td>ISMS</td>', '<td><table><tbody><tr><td>n</td></tr></tbody></table></td>')), 'a nested table is refused')
+verify(refused(second.replace('<td>ISMS</td>', '')), 'a row with a cell too few is refused')
+verify(refused(second.replace(minimal.prefix(product) + 'row-' + minimal.encode('KIGOV'), minimal.prefix(product) + 'row-' + minimal.encode('APL'))), 'two rows with one key are refused')
+verify(refused(second.replace(minimal.prefix(product) + 'row-' + minimal.encode('KIGOV'), 'x')), 'a row without its row anchor is refused')
+verify(refused(second + minimal.marker(product, 'start')), 'a duplicated marker is refused')
+boolean mergeRefused = false
+try { minimal.merge(second.replace('</tbody>', ''), product, base, [item('APL', 'A', 'B')], null) } catch (IllegalArgumentException expected) { mergeRefused = true }
+verify(mergeRefused, 'a table that cannot be read is never written')
+
+/* ---- Next to the full overview and the other product ----------------------------- */
+String full = overview.upsert(second, product, '601', 'Full export', 'DOC', 'Full', [[key: 'details', column: 'Details', label: 'Details', anchor: 'a1', count: '1 item']])
+verify(overview.read(full, product, 'DOC').rows.size() == 1 && minimal.read(full, product).rows.size() == 2, 'the minimal table and the full overview coexist')
+String both = minimal.merge(full, other, base, [item('ZZ', 'Other', 'x')], null)
+verify(minimal.read(both, product).rows.size() == 2 && minimal.read(both, other).rows.size() == 1, 'the products keep separate tables')
+
+/* ---- The write stages -------------------------------------------------------------- */
+Map store = [ok: true, id: '10', title: 'Overview', spaceKey: 'DOC', version: 3, storage: parent]
+def reader = { -> new LinkedHashMap(store) }
+def writer = { Map page, String body -> store.storage = body; store.version = page.version + 1; [ok: true] }
+List<Map> items = [item('APL', 'ART', 'C')]
+def merger = { String body -> minimal.merge(body, product, base, items, null) }
+def checker = { String body -> minimal.unconfirmed(body, product, base, items) }
+Map updated = minimal.update('10', 'DOC', reader, writer, merger, checker)
+verify(updated.state == 'updated' && store.version == 4 && minimal.keys(store.storage, product) == ['APL'], 'read, merge, one save and a confirmed read back')
+verify(minimal.update('11', 'DOC', reader, writer, merger, checker).state == 'failed', 'another page identity is refused before any write')
+Map refusedWrite = minimal.update('10', 'DOC', reader, { Map page, String body -> [ok: false, refused: true, error: 'conflict'] }, merger, checker)
+verify(refusedWrite.state == 'failed' && refusedWrite.reason.contains('conflict'), 'a refused save is a failure')
+Map silent = minimal.update('10', 'DOC', reader, { Map page, String body -> [ok: true] }, merger, checker)
+verify(silent.state == 'unknown', 'a save that did not raise the version is not claimed')
+store.storage = second.replace('</tbody>', '')
+verify(minimal.update('10', 'DOC', reader, writer, merger, checker).state == 'failed', 'an unreadable table fails before the write')
+
+/* ---- Cells --------------------------------------------------------------------- */
 verify(minimal.cell(product, base, 'lead', [state: 'failed', note: 'NPE']) == '<em>unreadable: NPE</em>', 'a failed read is stated, never empty')
 verify(minimal.cell(product, base, 'lead', [state: 'absent']) == '', 'an absent value is an empty cell')
 verify(minimal.cell(product, base, 'key', [value: 'A B']).contains('A%20B'), 'the key is encoded into the link')
-
-/* ---- Reading an own page back ----------------------------------------------- */
-Map read = minimal.parse(page, product)
-verify(read.ok == true && read.topics == ['Themengebiet 1': '', 'Themengebiet 2': ''], 'an own page reads back with its empty default topics')
-
-/* An administrator adds two topic columns in the editor: the editor stamps macro ids and wraps cells. */
-String lozenge = '<ac:structured-macro ac:name="status" ac:schema-version="1" ac:macro-id="m-1"><ac:parameter ac:name="colour">Green</ac:parameter><ac:parameter ac:name="title">KI</ac:parameter></ac:structured-macro>'
-String edited = page.replace('<th>Themengebiet 1</th><th>Themengebiet 2</th></tr>', '<th><p><strong>Themengebiet 1</strong></p></th><th>Themengebiet 2</th><th><br/></th></tr>')
-    .replace('<td></td><td></td></tr>', '<td><p>' + lozenge + ' Governance</p></td><td><p><br/></p></td><td></td></tr>')
-read = minimal.parse(edited, product)
-verify(read.ok == true, 'an edited page reads back: ' + read.reason)
-verify(read.topics.keySet() as List == ['Themengebiet 1', 'Themengebiet 2'], 'topics are read in page order, an empty unnamed column is dropped')
-verify(read.topics['Themengebiet 1'] == '<p>' + lozenge + ' Governance</p>', 'a topic cell is carried verbatim, lozenge included')
-verify(read.topics['Themengebiet 2'] == '', 'an editor-empty topic cell is empty')
-
-Map item2 = new LinkedHashMap(item)
-item2.issues = [value: '7300']
-item2.category = [value: 'Neue Kategorie']
-Map second = minimal.render(product, base, item2, read.topics, [], '2026-11-04 10:00', '0.6')
-verify(second.storage.contains('<p>' + lozenge + ' Governance</p>'), 'the next export keeps the topic')
-verify(second.topics == ['Themengebiet 1', 'Themengebiet 2'], 'the next export keeps the topic set')
-verify(second.storage.contains('Neue Kategorie') && !second.storage.contains('SWEP-Streams'), 'generated values are rewritten')
-verify(minimal.parse(second.storage, product).topics == read.topics, 'a rewritten page reads back to the same topics')
-
-/* ---- One topic set --------------------------------------------------------- */
-Map seeded = minimal.render(product, base, item, [:], ['Themengebiet 1', 'Themengebiet 2', 'Security'], 'now', '0.6')
-verify(seeded.topics == ['Themengebiet 1', 'Themengebiet 2', 'Security'], 'a page without topics is seeded with the known set')
-verify(seeded.storage.contains('<th>Security</th>'), 'a seeded topic is a column on the page')
-Map mergedCase = minimal.render(product, base, item, ['themengebiet 1': 'X', 'Neu': 'Y'], ['Themengebiet 1'], 'now', '0.6')
-verify(mergedCase.topics == ['Themengebiet 1', 'Neu'], 'topics match case-insensitively; a new page topic is appended')
-verify(mergedCase.sections.find { it.key == minimal.TOPIC + 'Themengebiet 1' }.html == 'X', 'the page value fills the known topic')
-
-/* ---- Fail closed ----------------------------------------------------------- */
-def refusedBy = { String storage -> Map result = minimal.parse(storage, product); result.ok == false && result.reason }
-verify(refusedBy(''), 'an empty page is refused')
-verify(refusedBy(page.replace(minimal.marker(product), 'something else')), 'a page without the marker is refused')
-verify(refusedBy(page.replace('<th>' + cx.esc(columns[2][1]) + '</th>', '<th>Renamed</th>')), 'a missing generated column is refused')
-verify(refusedBy(edited.replace('<th>Themengebiet 2</th>', '<th>THEMENGEBIET 1</th>')), 'a repeated topic is refused')
-verify(refusedBy(edited.replace('<th><br/></th>', '<th></th>').replace('<td></td></tr>', '<td>text</td></tr>')), 'content without a heading is refused')
-verify(refusedBy(page.replace('</tr></tbody>', '</tr><tr><td>x</td></tr></tbody>')), 'a second data row is refused')
-verify(refusedBy(page.replace('<td>', '<td colspan="2">')), 'merged cells are refused')
-verify(refusedBy(page.replace('</td></tr>', '</td><td><table><tbody><tr><td>n</td></tr></tbody></table></td></tr>')), 'a nested table is refused')
-verify(refusedBy(page + page), 'two generated tables are refused')
-verify(refusedBy(page.replace('</td></tr>', '</td><td>extra</td></tr>')), 'a cell without its heading is refused')
-verify(minimal.parse(page.replace('<tr><td>', '<tr><td><p>').replace('</td><td>', '</p></td><td>'), product).ok == true,
-    'editor paragraphs in generated cells do not refuse the page')
-verify(cx.parseRemarks(page).outcome == 'failed', 'the full export never adopts a minimal page')
-verify(minimal.parse(page.replace(minimal.marker(product), cx.MARKER), product).ok == false, 'the minimal export never adopts a full page')
-
-/* ---- Overview summary ------------------------------------------------------ */
-String ov = minimal.overviewProduct(product)
-String parent = '<p>KEEP intro</p>'
-String one = overview.upsert(parent, ov, '501', minimal.title(product, 'APL'), 'DOC', 'ART & Plattform', second.sections)
-verify(one.startsWith(parent), 'content outside the summary is kept')
-verify(one.contains(cx.esc(minimal.OVERVIEW_NOTE)), 'the summary says it is generated and overwritten')
-verify(overview.confirmed(one, ov, '501', minimal.title(product, 'APL'), 'DOC', 'ART & Plattform', second.sections), 'the summary row is confirmed')
-Map model = overview.read(one, ov, 'DOC')
-verify(model.columns.collect { it.key } == (columns.findAll { it[0] != 'name' }.collect { minimal.COLUMN + it[0] } +
-    [minimal.TOPIC + 'Themengebiet 1', minimal.TOPIC + 'Themengebiet 2']), 'the summary carries the page columns and topics')
-verify(model.rows[0][2 + model.columns.findIndexOf { it.key == minimal.TOPIC + 'Themengebiet 1' } - 1].contains('Governance'),
-    'the summary shows the topic value of the page')
-verify(minimal.knownTopics(one, product, 'DOC') == ['Themengebiet 1', 'Themengebiet 2'], 'the known topic set is read from the summary')
-verify(minimal.knownTopics(parent, product, 'DOC') == [], 'a parent without a summary knows no topic')
-verify(!overview.confirmed(one, ov, '501', minimal.title(product, 'APL'), 'DOC', 'ART & Plattform', first.sections),
-    'a row with other values is not confirmed')
-Map otherItem = new LinkedHashMap(item); otherItem.key = [value: 'OLD']; otherItem.name = [value: 'Old one']
-Map third = minimal.render(product, base, otherItem, [:], minimal.knownTopics(one, product, 'DOC'), 'now', '0.6')
-String two = overview.upsert(one, ov, '502', minimal.title(product, 'OLD'), 'DOC', 'Old one', third.sections)
-verify(overview.read(two, ov, 'DOC').rows.size() == 2, 'a second object adds a row')
-verify(overview.read(two, ov, 'DOC').rows[0] == overview.read(one, ov, 'DOC').rows[0], 'the other row stays as it was')
-String edit = two.replace('<ac:structured-macro ', '<ac:structured-macro ac:macro-id="x" ')
-verify(overview.read(edit, ov, 'DOC').rows.size() == 2, 'editor macro ids keep the summary readable')
-
-/* Coexistence with the full overview of the same product on the same parent. */
-String full = overview.upsert(two, product, '601', 'Full export', 'DOC', 'Full', [[key: 'details', column: 'Details', label: 'Details', anchor: 'a1', count: '1 item']])
-verify(overview.read(full, product, 'DOC').rows.size() == 1, 'the full overview is its own table')
-verify(overview.read(full, ov, 'DOC').rows.size() == 2, 'the summary survives next to the full overview')
-verify(overview.read(full.replace('<p>KEEP intro</p>', ''), ov, 'DOC').rows.size() == 2, 'the summary does not depend on surrounding text')
-boolean adopted = false
-try { overview.read(page, ov, 'DOC') } catch (IllegalArgumentException expected) { adopted = true }
-verify(adopted, 'a minimal object page is never used as an overview')
-
-/* ---- Objects that no longer exist ------------------------------------------ */
-String marked = minimal.markGone(two, product, 'DOC', ['APL'] as Set)
-verify(marked.contains(minimal.GONE) && overview.read(marked, ov, 'DOC').rows.size() == 2, 'a missing object keeps its row and is marked')
-verify(overview.read(marked, ov, 'DOC').rows[0] == overview.read(two, ov, 'DOC').rows[0], 'an existing object is not touched')
-verify(minimal.markGone(marked, product, 'DOC', ['APL'] as Set) == marked, 'marking is idempotent')
-verify(!minimal.markGone(marked, product, 'DOC', ['APL', 'OLD'] as Set).contains(minimal.GONE), 'an object that exists again is unmarked')
-verify(minimal.markGone(two, product, 'DOC', null) == two, 'without a complete key list nothing is marked')
-verify(minimal.markGone(marked.replace('<ac:structured-macro ', '<ac:structured-macro ac:macro-id="y" '), product, 'DOC', ['APL', 'OLD'] as Set)
-    .indexOf(minimal.GONE) < 0, 'an editor-stamped mark is still recognised')
 
 /* ---- Jira collectors, against stubs of the platform types they name ---------- */
 if (product == 'jira') {
     File repo = new File(System.getProperty('repoRoot', '.'))
     String source = new File(repo, 'jira/jiraDCprojectConfig.groovy').getText('UTF-8')
-    String functions = source.substring(source.indexOf('Map<String, Object> minimalRead(Closure body) {'),
+    String functions = source.substring(source.indexOf('Map<String, Object> minimalContext() {'),
         source.indexOf('/* GET ?report=minimal. With project= one project'))
-    def collectors = new GroovyShell(getClass().classLoader).evaluate("""
+    def collectors = new GroovyShell(getClass().classLoader).evaluate('''
 import org.codehaus.groovy.runtime.InvokerHelper
 class ApplicationUser { String displayName; String getDisplayName() { displayName } }
 class ProjectCategory { String name; String getName() { name } }
@@ -154,23 +157,87 @@ class Project {
 class ProjectRole {}
 class RoleActor { String descriptor; String getDescriptor() { descriptor } }
 class ProjectRoleActors { Set<RoleActor> actors; Set<RoleActor> getRoleActors() { actors } }
-class ProjectRoleManager { Set<RoleActor> actors; ProjectRoleActors getProjectRoleActors(ProjectRole role, Project project) { new ProjectRoleActors(actors: actors) } }
+class ProjectRoleManager { Set<RoleActor> actors; ProjectRole getProjectRole(String n) { new ProjectRole() }; ProjectRoleActors getProjectRoleActors(ProjectRole role, Project project) { new ProjectRoleActors(actors: actors) } }
 class ProjectManager { List<Project> active; List<Project> archived; List<Project> getProjectObjects() { active }; List<Project> getArchivedProjects() { archived } }
 class PagerFilter { int max; PagerFilter(int max) { this.max = max } }
-""" + functions + '\nreturn this')
-    Class loader = collectors.class
+class FieldScreenLayoutItem { String fieldId; String getFieldId() { fieldId } }
+class FieldScreenTab { List<FieldScreenLayoutItem> items; List<FieldScreenLayoutItem> getFieldScreenLayoutItems() { items } }
+class FieldScreen { List<FieldScreenTab> tabs; List<FieldScreenTab> getTabs() { tabs } }
+class FieldScreenSchemeItem { FieldScreen screen; FieldScreen getFieldScreen() { screen } }
+class FieldScreenScheme { List<FieldScreenSchemeItem> items; Collection<FieldScreenSchemeItem> getFieldScreenSchemeItems() { items } }
+class IssueTypeScreenSchemeEntity { FieldScreenScheme scheme; FieldScreenScheme getFieldScreenScheme() { scheme } }
+class IssueTypeScreenScheme { Long id; List<IssueTypeScreenSchemeEntity> entities; Long getId() { id }; Collection<IssueTypeScreenSchemeEntity> getEntities() { entities } }
+class IssueTypeScreenSchemeManager { IssueTypeScreenScheme scheme; int reads; IssueTypeScreenScheme getIssueTypeScreenScheme(Project p) { reads++; scheme } }
+class CustomFieldType { String key; String getKey() { key } }
+class CustomField { CustomFieldType type; CustomFieldType getCustomFieldType() { type } }
+class CustomFieldManager { Map<String, CustomField> fields; CustomField getCustomFieldObject(String id) { fields.get(id) } }
+class JiraWorkflow { List actions; Object descriptor; Collection getAllActions() { actions }; Object getDescriptor() { descriptor } }
+class AssignableWorkflowScheme { Map<String, String> mappings; String fallback; Map<String, String> getMappings() { mappings }; String getActualDefaultWorkflow() { fallback } }
+class WorkflowSchemeManager { AssignableWorkflowScheme scheme; AssignableWorkflowScheme getWorkflowSchemeObj(Project p) { scheme } }
+class WorkflowManager { Map<String, JiraWorkflow> workflows; int reads; JiraWorkflow getWorkflow(String name) { reads++; workflows.get(name) } }
+class ComponentAccessor {
+    static Map<Class, Object> components = [:]
+    static Object pluginAccessor; static Object issueManager; static Object authentication
+    static IssueTypeScreenSchemeManager screens; static CustomFieldManager fields; static Object applicationProperties
+    static <T> T getComponent(Class<T> type) { (T) components.get(type) }
+    static Object getPluginAccessor() { pluginAccessor }
+    static Object getIssueManager() { issueManager }
+    static Object getJiraAuthenticationContext() { authentication }
+    static IssueTypeScreenSchemeManager getIssueTypeScreenSchemeManager() { screens }
+    static CustomFieldManager getCustomFieldManager() { fields }
+}
+''' + "class SearchService {}\nclass PluginMetadataManagerStub { Set system = [] as Set; boolean isSystemProvided(Object plugin) { system.contains(plugin.key) } }\n" + functions + '\nreturn this')
     def type = { String name -> collectors.class.classLoader.loadClass(name) }
+    Class accessor = type('ComponentAccessor')
     def user = type('ApplicationUser').newInstance(displayName: 'Pius H\u00f6ltschi')
     def project = type('Project').newInstance(key: 'APL', name: 'ART Plattform', id: 10L, lead: user,
         category: type('ProjectCategory').newInstance(name: 'SWEP-Streams'))
     def actors = [type('RoleActor').newInstance(descriptor: 'jira-admins'), type('RoleActor').newInstance(descriptor: 'Daniel Tobler')] as Set
+
+    /* Apps: Tempo (custom field type, post function by full.module.key), ScriptRunner (condition by
+     * class.name), and the system workflow plugin, which is not an app. */
+    def implementation = { String name -> new Expando(getImplementationClass: { -> collectors.class.classLoader.parseClass('class ' + name + ' {}') }, getModuleClass: { -> null }) }
+    def plugins = [new Expando(key: 'is.origo.jira.tempo-plugin', getKey: { -> 'is.origo.jira.tempo-plugin' }, getName: { -> 'Tempo Timesheets' }, getModuleDescriptors: { -> [] }),
+                   new Expando(key: 'com.onresolve.jira.groovy.groovyrunner', getKey: { -> 'com.onresolve.jira.groovy.groovyrunner' }, getName: { -> 'ScriptRunner' },
+                               getModuleDescriptors: { -> [implementation('ScriptConditionImpl')] }),
+                   new Expando(key: 'com.atlassian.jira.plugin.system.workflow', getKey: { -> 'com.atlassian.jira.plugin.system.workflow' }, getName: { -> 'Workflow' },
+                               getModuleDescriptors: { -> [implementation('SystemPostFunction')] })]
+    def metadata = type('PluginMetadataManagerStub').newInstance(system: ['com.atlassian.jira.plugin.system.workflow'] as Set)
+    accessor.pluginAccessor = new Expando(getPlugins: { -> plugins })
+    accessor.components = [(type('ProjectRoleManager')): type('ProjectRoleManager').newInstance(actors: actors)]
+    def fieldOf = { String key -> type('CustomField').newInstance(type: type('CustomFieldType').newInstance(key: key)) }
+    accessor.fields = type('CustomFieldManager').newInstance(fields: [
+        customfield_1: fieldOf('is.origo.jira.tempo-plugin:account'), customfield_2: fieldOf('is.origo.jira.tempo-plugin:team'),
+        customfield_3: fieldOf('com.atlassian.jira.plugin.system.customfieldtypes:textfield')])
+    def tab = type('FieldScreenTab').newInstance(items: ['summary', 'customfield_1', 'customfield_2', 'customfield_3', 'customfield_1'].collect { type('FieldScreenLayoutItem').newInstance(fieldId: it) })
+    def screenScheme = type('FieldScreenScheme').newInstance(items: [type('FieldScreenSchemeItem').newInstance(screen: type('FieldScreen').newInstance(tabs: [tab]))])
+    accessor.screens = type('IssueTypeScreenSchemeManager').newInstance(scheme: type('IssueTypeScreenScheme').newInstance(id: 5L,
+        entities: [type('IssueTypeScreenSchemeEntity').newInstance(scheme: screenScheme), type('IssueTypeScreenSchemeEntity').newInstance(scheme: screenScheme)]))
+    def entry = { Map args -> new Expando(getArgs: { -> args }) }
+    def action = new Expando(getValidators: { -> [] }, getPreFunctions: { -> [] },
+        getPostFunctions: { -> [entry(['full.module.key': 'is.origo.jira.tempo-pluginlog-work-function']), entry(['class.name': 'SystemPostFunction'])] },
+        getRestriction: { -> new Expando(getConditionsDescriptor: { -> new Expando(getConditions: { -> [entry(['class.name': 'ScriptConditionImpl']),
+            new Expando(getConditions: { -> [entry(['class.name': 'ScriptConditionImpl'])] }, getArgs: { -> null })] }) }) },
+        getUnconditionalResult: { -> new Expando(getPostFunctions: { -> [entry(['full.module.key': 'is.origo.jira.tempo-pluginother'])] }) },
+        getConditionalResults: { -> [] })
+    def workflow = type('JiraWorkflow').newInstance(actions: [action], descriptor: new Expando(getSteps: { -> [] }, getGlobalConditions: { -> null }))
+    def workflows = type('WorkflowManager').newInstance(workflows: ['Software': workflow])
+    accessor.components[type('WorkflowManager')] = workflows
+    accessor.components[type('WorkflowSchemeManager')] = type('WorkflowSchemeManager').newInstance(scheme:
+        type('AssignableWorkflowScheme').newInstance(mappings: ['10001': 'Software'], fallback: 'Software'))
     def issue = new Expando(getUpdated: { -> new java.sql.Timestamp(Date.parse('yyyy-MM-dd', '2026-10-30').time) })
     def jql = []
     def search = new Expando(parseQuery: { u, String q -> jql << q; [valid: true, query: 'Q'] },
         searchOverrideSecurity: { u, q, pager -> assert pager.max == 1; new Expando(getResults: { -> [issue] }) })
-    Map context = [roleManager: type('ProjectRoleManager').newInstance(actors: actors), adminRole: type('ProjectRole').newInstance(),
-                   roleProblem: null, issueManager: new Expando(getIssueCountForProject: { Long id -> id == 10L ? 7226L : -1L }),
-                   searchService: search, user: user]
+    accessor.components[type('SearchService')] = search
+    accessor.issueManager = new Expando(getIssueCountForProject: { Long id -> id == 10L ? 7226L : -1L })
+    accessor.authentication = new Expando(getLoggedInUser: { -> user })
+
+    Map index = collectors.minimalAppIndex()
+    index.pluginKeys.size()
+    Map context = collectors.minimalContext()
+    context.appIndex = index
+    index.appNames.remove('com.atlassian.jira.plugin.system.workflow')
     Map row = collectors.minimalRow(project, context)
     verify(row.key.value == 'APL' && row.name.value == 'ART Plattform', 'key and name are read')
     verify(row.lead.value == 'Pius H\u00f6ltschi', 'the lead is read by display name')
@@ -179,6 +246,18 @@ class PagerFilter { int max; PagerFilter(int max) { this.max = max } }
     verify(row.issues.value == '7226', 'the issue count comes from the IssueManager call')
     verify(row.lastUpdate.value == '30.10.2026' && row.lastUpdate.state == null, 'the latest update is one search, formatted as in the requirement')
     verify(jql == ['project = "APL" ORDER BY updated DESC'], 'the search names the project and sorts by update')
+    verify(row.appFields.value == '2', 'distinct app custom fields on the screens, a field repeated or from Jira not counted')
+    verify(row.workflowExtensions.value == '4', 'app conditions and functions, nested and in results, a system function not counted')
+    verify(row.apps.value == ['ScriptRunner', 'Tempo Timesheets'], 'used apps come from fields and workflows')
+    collectors.minimalRow(type('Project').newInstance(key: 'TWO', name: 'Two', id: 11L), context)
+    verify(workflows.reads == 1, 'a workflow shared by projects is walked once per request')
+    index.deadline = 0L
+    Map late = collectors.minimalRow(project, context)
+    verify(late.appFields.state == 'notMeasured' && late.apps.state == 'notMeasured', 'past the budget the app columns are not measured, not zero')
+    index.deadline = Long.MAX_VALUE
+    index.problem = 'the installed apps could not be listed'
+    verify(collectors.minimalRow(project, context).workflowExtensions.note.contains('could not be listed'), 'an unreadable app list is stated')
+    index.problem = null
     search.searchOverrideSecurity = { u, q, pager -> throw new MissingMethodException('searchOverrideSecurity', Object, [] as Object[]) }
     search.search = { u, q, pager -> new Expando(getResults: { -> [issue] }) }
     verify(collectors.minimalLastUpdate('APL', context).state == 'partial', 'a search under the administrator\'s security is a lower bound')
@@ -191,9 +270,6 @@ class PagerFilter { int max; PagerFilter(int max) { this.max = max } }
     Map failed = collectors.minimalRow(project, context)
     verify(failed.admins.state == 'failed' && failed.admins.note.contains('Administrators'), 'a missing Administrators role is stated')
     verify(failed.issues.state == 'failed' && failed.issues.note.contains('db down'), 'a failed count is unreadable, never zero')
-    project.lead = null; project.category = null
-    Map empty = collectors.minimalRow(project, context)
-    verify(empty.lead.state == 'absent' && empty.category.state == 'absent', 'an unset lead or category is empty, not failed')
     def projects = type('ProjectManager').newInstance(active: [project], archived: [type('Project').newInstance(key: 'ARC')])
     verify(collectors.minimalExistingKeys(projects) == ['APL', 'ARC'] as Set, 'archived projects count as existing')
     verify(collectors.minimalExistingKeys(type('ProjectManager').newInstance(active: [project], archived: null)) == null,
@@ -282,14 +358,14 @@ class Db {
         'SELECT s.spacekey FROM spaces s': [[spacekey: 'APL'], [spacekey: 'KIGOV']]]
     Map estate = scanClass.rows(connection, null)
     verify(estate.failure == null && estate.rows.size() == 2 && estate.keys == ['APL', 'KIGOV'] as Set, 'every space is read in one pass')
-    Map apl = estate.rows[0].minimal
-    verify(apl.key.value == 'APL' && apl.name.value == 'ART Plattform', 'key and name are read')
-    verify(apl.description.value.startsWith('Bereich f') && !apl.description.value.contains('<p>'), 'the description is plain text')
-    verify(apl.category.value == ['art', 'safe'], 'categories are the team labels by name')
-    verify(apl.admins.value == ['confluence-administrators', 'Daniel Tobler', 'nodisplay'], 'administrators are groups and users, display name first')
-    verify(apl.pages.value == '412', 'the page count is read')
-    Map kigov = estate.rows[1].minimal
-    verify(kigov.pages.value == '0' && kigov.category.state == 'absent' && kigov.admins.value == ['k3'], 'a space without pages or categories is a measured zero')
+    Map aplValues = estate.rows[0].minimal
+    verify(aplValues.key.value == 'APL' && aplValues.name.value == 'ART Plattform', 'key and name are read')
+    verify(aplValues.description.value.startsWith('Bereich f') && !aplValues.description.value.contains('<p>'), 'the description is plain text')
+    verify(aplValues.category.value == ['art', 'safe'], 'categories are the team labels by name')
+    verify(aplValues.admins.value == ['confluence-administrators', 'Daniel Tobler', 'nodisplay'], 'administrators are groups and users, display name first')
+    verify(aplValues.pages.value == '412', 'the page count is read')
+    Map kigovValues = estate.rows[1].minimal
+    verify(kigovValues.pages.value == '0' && kigovValues.category.state == 'absent' && kigovValues.admins.value == ['k3'], 'a space without pages or categories is a measured zero')
     verify(scanClass.rows(connection, 'kigov').rows*.space.key == ['KIGOV'], 'one space can be read on its own')
     db.failing = ['cwd_user'] as Set
     Map partial = scanClass.rows(connection, null)
@@ -339,14 +415,12 @@ class Db {
     verify(scanClass.macros(0L).state == 'failed', 'without a search manager nothing is measured')
 }
 
-/* ---- The single export on the report page offers the minimal report too ------- */
+
+/* ---- The switch on the report page and in the bulk export ---------------------- */
 def reportShell = getClass().classLoader.loadClass('Report').getDeclaredConstructor().newInstance()
 if (product == 'jira') { reportShell.projectKey = 'APL'; reportShell.projectName = 'ART' } else { reportShell.spaceKey = 'APL'; reportShell.spaceName = 'ART' }
 String reportPage = getClass().classLoader.loadClass('Render').html(reportShell, [:] as LinkedHashMap, false)
 verify(reportPage.contains('id="exportMinimal"') && reportPage.contains('onchange="exportModeChanged()"'), 'the single export carries the minimal switch')
-verify(reportPage.contains('data-minimal-title="' + minimal.title(product, 'APL') + '"'), 'the switch knows the minimal title')
-verify(reportPage.contains('data-full-title="' + cx.title('APL') + '"'), 'and the full title to switch back to')
-verify(reportPage.contains('function readMinimal(query)') && reportPage.contains("&report=minimal&format=json"), 'the minimal row is read from the GET of this endpoint')
-verify(reportPage.contains("body.mode = 'minimal'"), 'the write is posted in minimal mode')
+verify(reportPage.contains("action: 'minimal'") && reportPage.contains('function exportMinimalRow(payload)'), 'the single export posts the minimal action for this object')
 
 println 'MINIMAL ' + product + ': ' + checks + ' checks passed'

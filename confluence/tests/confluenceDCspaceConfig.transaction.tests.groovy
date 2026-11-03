@@ -24,6 +24,18 @@ interface TransactionCallback<T> { T doInTransaction() }
 interface TransactionTemplate { <T> T execute(TransactionCallback<T> action) }
 ''')
 loader.parseClass(new File(repo, 'confluence/tests/fixtures/page-export-platform.groovy'))
+// The values and the macro scan of the minimal report, as the real MinimalScan returns them.
+loader.parseClass('''
+class MinimalScan {
+    static final long MACRO_BUDGET_MS = 1L
+    static Map estate = [failure: null, rows: [], keys: [] as Set]
+    static Map rows(Object connection, String onlyKey) { estate }
+    static Map macros(long budget) { [state: 'measured', note: null, apps: [:], appMacros: [:], userMacros: [:]] }
+    static void addMacros(Map values, String key, Map scan) {
+        values.put('apps', [state: 'absent']); values.put('appMacros', [value: '0']); values.put('userMacros', [value: '0'])
+    }
+}
+''')
 int txStart = source.indexOf('class PageExportRejected ')
 assert txStart >= 0 : 'Transaction helper start marker missing'
 int txEnd = source.indexOf('/* ---- End page export transaction ---- */', txStart)
@@ -217,51 +229,43 @@ assert !lostExport.ok && !lostExport.written : lostExport
 assert untouchedSettings.settings.values.isEmpty() : 'a rolled-back export must leave no log entry: ' + untouchedSettings.settings.values
 println 'PASS: the export log is written after the commit, read back, and never fails the export'
 
-/* The minimal report through the actual export branch: page, summary, topics and one topic set. */
+/* The minimal report through the actual export branch: only the overview page, one save, topics kept. */
 Store minimalStore = new Store()
 wire(minimalStore)
 ComponentLocator.components.remove(settingsType)
-def minimalPayload = { String key, String name -> [mode: 'minimal', spaceKey: 'DOC', title: MinimalReport.title('confluence', key),
-    parentPageId: '', parentTitle: 'Space overview', space: [key: key, name: name],
-    minimal: [key: [value: key], name: [value: name], description: [value: 'About ' + name], category: [value: ['safe']],
-              admins: [value: ['confluence-admins']], pages: [value: '12'], apps: [value: ['Draw.io']],
-              appMacros: [value: '1'], userMacros: [value: '0']]] }
-Map minimalFirst = handler.export(minimalPayload('ALPHA', 'Alpha'))
-assert minimalFirst.ok && minimalFirst.written && minimalFirst.mode == 'minimal' && minimalFirst.overview.state == 'updated' : minimalFirst
-assert minimalFirst.exportLog.state == 'skipped' : minimalFirst
-Page alphaPage = minimalStore.pages[minimalFirst.pageId as long]
-assert alphaPage.body.contains(MinimalReport.CONFLUENCE_MARKER) && !alphaPage.body.contains(Cx.MARKER)
-String summaryProduct = MinimalReport.overviewProduct('confluence')
-assert ConfigOverview.read(minimalStore.byId(minimalFirst.parentPageId as long).body, summaryProduct, 'DOC').rows.size() == 1
-assert alphaPage.body.contains('<th>Themengebiet 1</th><th>Themengebiet 2</th></tr>') : 'the first page starts with the default topics'
-alphaPage.body = alphaPage.body.replace('<td></td><td></td></tr>', '<td>KI-Governance</td><td></td></tr>')
+Db.factoryObject = new Object()
+def spaceRow = { String key, String name, String pages -> [space: [key: key, name: name], minimal: [key: [value: key], name: [value: name],
+    description: [value: 'About ' + name], category: [value: ['safe']], admins: [value: ['confluence-admins']], pages: [value: pages]]] }
+MinimalScan.estate = [failure: null, rows: [spaceRow('ALPHA', 'Alpha', '12'), spaceRow('BETA', 'Beta', '3')], keys: ['ALPHA', 'BETA'] as Set]
+Map minimalFirst = handler.export([action: 'minimal', spaceKey: 'DOC', parentPageId: '', parentTitle: 'Space overview', keys: ['ALPHA']])
+assert minimalFirst.ok && minimalFirst.written && minimalFirst.parentAction == 'created' && minimalFirst.table.state == 'updated' : minimalFirst
+assert minimalStore.pages.size() == 1 : 'the minimal report writes only the overview page'
+assert minimalStore.commits == 1 && minimalStore.writes.every { it.transaction } : minimalStore.writes
+long summaryId = minimalFirst.parentPageId as long
+String summary = minimalStore.pages[summaryId].body
+assert summary.contains(MinimalReport.PARENT_BODY) && MinimalReport.keys(summary, 'confluence') == ['ALPHA']
+assert summary.contains('<th>Themengebiet 1</th><th>Themengebiet 2</th></tr>') : 'a new table starts with the default topics'
+minimalStore.pages[summaryId].body = summary.replace('<td></td><td></td></tr>', '<td>KI-Governance</td><td></td></tr>')
 minimalStore.nextRequest()
-Map alphaAgain = minimalPayload('ALPHA', 'Alpha')
-alphaAgain.parentPageId = minimalFirst.parentPageId
-alphaAgain.parentTitle = ''
-alphaAgain.minimal.pages = [value: '13']
-Map minimalSecond = handler.export(alphaAgain)
-assert minimalSecond.ok && minimalSecond.action == 'updated' && minimalSecond.topics == ['Themengebiet 1', 'Themengebiet 2'] : minimalSecond
-assert minimalStore.byId(minimalFirst.pageId as long).body.contains('KI-Governance') : 'the topic survives the next export'
-assert minimalStore.byId(minimalFirst.pageId as long).body.contains('>13<') : 'generated values are rewritten'
-String summary = minimalStore.byId(minimalFirst.parentPageId as long).body
-assert summary.contains('KI-Governance') && MinimalReport.knownTopics(summary, 'confluence', 'DOC') == ['Themengebiet 1', 'Themengebiet 2']
+MinimalScan.estate.rows[0].minimal.pages = [value: '13']
+Map minimalSecond = handler.export([action: 'minimal', spaceKey: 'DOC', parentPageId: minimalFirst.parentPageId, parentTitle: '', keys: ['ALPHA', 'BETA', 'NOPE']])
+assert minimalSecond.ok && minimalSecond.parentAction == 'found' && minimalSecond.keys == ['ALPHA', 'BETA'] : minimalSecond
+assert minimalSecond.missing == ['NOPE'] && minimalSecond.warnings.any { it.contains('NOPE') } : minimalSecond
+summary = minimalStore.pages[summaryId].body
+assert summary.contains('KI-Governance') && summary.contains('>13<') && MinimalReport.keys(summary, 'confluence') == ['ALPHA', 'BETA']
+assert minimalStore.writes.count { it.id == summaryId } == 3 : 'create, first table, one save for both spaces'
 minimalStore.nextRequest()
-Map beta = minimalPayload('BETA', 'Beta')
-beta.parentPageId = minimalFirst.parentPageId
-beta.parentTitle = ''
-Map minimalBeta = handler.export(beta)
-assert minimalBeta.ok && minimalBeta.topics == ['Themengebiet 1', 'Themengebiet 2'] : minimalBeta
-assert minimalStore.byId(minimalBeta.pageId as long).body.contains('<th>Themengebiet 1</th>') : 'a new page is seeded with the topic set'
-assert ConfigOverview.read(minimalStore.byId(minimalFirst.parentPageId as long).body, summaryProduct, 'DOC').rows.size() == 2
-minimalStore.pages[minimalFirst.pageId as long].body = minimalStore.pages[minimalFirst.pageId as long].body.replace(MinimalReport.CONFLUENCE_MARKER, 'x')
-minimalStore.nextRequest()
-Map refusedMinimal = handler.export(alphaAgain)
-assert !refusedMinimal.ok && !refusedMinimal.written && refusedMinimal.stage == 'read' : refusedMinimal
-minimalStore.nextRequest()
-Map fullOnMinimalTitle = payload()
-fullOnMinimalTitle.title = MinimalReport.title('confluence', 'BETA')
-fullOnMinimalTitle.parentTitle = ''
-assert !handler.export(fullOnMinimalTitle).written : 'the full export never adopts a minimal page'
-println 'PASS: the minimal export writes its page and summary, keeps topics and seeds the topic set'
+int pagesBefore = minimalStore.pages.size()
+Map unknown = handler.export([action: 'minimal', spaceKey: 'DOC', parentPageId: '', parentTitle: 'Another overview', keys: ['NOPE']])
+assert !unknown.ok && unknown.status == 404 && minimalStore.pages.size() == pagesBefore : 'unknown keys create no page'
+Map noParent = handler.export([action: 'minimal', spaceKey: 'DOC', parentPageId: '', parentTitle: '', keys: ['ALPHA']])
+assert !noParent.ok && noParent.status == 400 : 'the minimal report needs its overview page'
+Store conflicting = new Store(conflictOnOverview: true)
+wire(conflicting)
+Map conflicted = handler.export([action: 'minimal', spaceKey: 'DOC', parentPageId: '', parentTitle: 'Space overview', keys: ['ALPHA']])
+assert !conflicted.ok && conflicting.pages.isEmpty() && conflicting.rollbacks == 1 : 'a refused table save leaves no new overview page behind'
+Db.factoryObject = null
+wire(new Store())
+assert handler.export([action: 'minimal', spaceKey: 'DOC', parentPageId: '', parentTitle: 'Space overview', keys: ['ALPHA']]).status == 500
+println 'PASS: the minimal report writes only its overview table, in one save per run, and keeps the topics'
 ''', 'ExportLifecycleTests.groovy')

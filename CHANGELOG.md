@@ -4,6 +4,35 @@ All notable changes to this project are documented here. Each endpoint carries i
 version, declared once in its helper class and printed by every output channel, so the
 sections below are grouped by endpoint rather than by a single repository version.
 
+## confluenceDCspaceConfig 0.7 and jiraDCprojectConfig 0.7
+
+### Changed
+
+- **The minimal report keeps only one table on the overview page.** It no longer writes a page
+  per project or space. The new `minimal` action reads the values of all selected projects or
+  spaces on the server and writes their rows with one save of the overview page, then reads them
+  back. The bulk export and the export form of a report page both use it.
+- **Topics are maintained in the table itself.** A new table starts with Themengebiet 1 and 2.
+  Every export rewrites only the generated columns, found by their column anchors, in the exported
+  rows; every other column and row is kept verbatim. Columns may be renamed, moved or added.
+- The 0.6 minimal pages, their summary table and the minimal changes to `ConfigOverview`,
+  `OverviewExport` and the detail export route are removed; the full export is exactly as before
+  0.6. Pages and tables written by 0.6 are not read; delete them by hand.
+
+### Added
+
+- **Jira app columns:** Verwendete Apps, Anzahl App-Felder and Anzahl Workflow-Erweiterungen per
+  project, with the attribution rules of `jiraDCappFootprint` built in: app custom fields on the
+  project's screens, and app conditions, validators and functions in its workflows. Each scheme and
+  workflow is read once per request, within a 120-second budget.
+
+### Validation
+
+- Offline suites cover the table model, the fail-closed read, the update stages, the Jira
+  collectors including the app columns against stubs, and the minimal action through the actual
+  Confluence export transaction. Not measured on an instance: the Jira screen and workflow walk
+  for the app columns, the search for the latest update and the Confluence macro scan.
+
 ## confluenceDCspaceConfig 0.6 and jiraDCprojectConfig 0.6
 
 ### Added

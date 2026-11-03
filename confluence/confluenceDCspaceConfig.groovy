@@ -9464,8 +9464,8 @@ spaceConfig(
                 Map<String, Object> table = MinimalReport.update(overviewId, overviewSpace,
                     { -> overviewRead(minimalService, overviewId) },
                     { Map page, String storage -> overviewSave(minimalManager, page, storage) },
-                    { String body -> MinimalReport.merge(body, "confluence", minimalBase, minimalItems, minimalExisting) },
-                    { String body -> MinimalReport.unconfirmed(body, "confluence", minimalBase, minimalItems) })
+                    { String current -> MinimalReport.merge(current, "confluence", minimalBase, minimalItems, minimalExisting) },
+                    { String current -> MinimalReport.unconfirmed(current, "confluence", minimalBase, minimalItems) })
                 if (table.get("state") == "failed") {
                     /* A refusal rolls the unit of work back, a parent created above included. */
                     return refuse(409, "minimal", String.valueOf(table.get("reason")) + " Nothing is written.")

@@ -10006,8 +10006,8 @@ projectConfig(
             Map<String, Object> minimalTable = MinimalReport.update(minimalPage, minimalSpace,
                 { -> confluenceOverviewRead(targetFactory, minimalPage) },
                 { Map page, String storage -> confluenceOverviewWrite(targetFactory, page, storage) },
-                { String body -> MinimalReport.merge(body, "jira", minimalBaseUrl, minimalItems, minimalExisting) },
-                { String body -> MinimalReport.unconfirmed(body, "jira", minimalBaseUrl, minimalItems) })
+                { String current -> MinimalReport.merge(current, "jira", minimalBaseUrl, minimalItems, minimalExisting) },
+                { String current -> MinimalReport.unconfirmed(current, "jira", minimalBaseUrl, minimalItems) })
             List<String> minimalWarnings = new ArrayList<String>()
             if (minimalExisting == null) {
                 minimalWarnings.add("The project list could not be read completely, so no row was marked as no longer existing.")

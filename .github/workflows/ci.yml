@@ -117,6 +117,13 @@ jobs:
           fi
           java -Dfile.encoding=UTF-8 -cp "$GROOVY_CP" groovy.ui.GroovyMain tools/parsecheck.groovy "$F"
 
+      # Semantic analysis without the platform classpath: catches what the parse check
+      # cannot, such as a closure parameter shadowing the endpoint's own body parameter.
+      - name: Scope check
+        run: |
+          set -euo pipefail
+          java -Dfile.encoding=UTF-8 -cp "$GROOVY_CP" groovy.ui.GroovyMain tools/scopecheck.groovy '${{ matrix.endpoint }}'
+
       - name: Overview helper static typecheck
         if: matrix.product == 'jira' || matrix.product == 'confluence'
         run: |

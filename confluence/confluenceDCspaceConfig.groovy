@@ -24,6 +24,10 @@
  *   this space configured", never "how much content is in it". That keeps the run
  *   cheap enough to be harmless on a production instance.
  *
+ *   The one exception is opt-in and separate: report=minimal (see "Minimal
+ *   report" below) counts current pages and scans the content index for macro
+ *   usage, once per request over the whole instance. The full report never does.
+ *
  * The landing page: an estate sweep, not a picker
  *   Called without a space, this endpoint returns ONE ROW PER SPACE for EVERY
  *   space, carrying the stored facts an administrator triages on: key, name,
@@ -97,6 +101,11 @@
  *                                                  them closed; full opens all
  *   values=true|false         default false  property VALUES are not read at all
  *                                            unless this is set. See below.
+ *   report=full|minimal       default full   minimal is the reduced inventory:
+ *                                            key, name, description, category,
+ *                                            administrators, page count, used apps,
+ *                                            app and user macros. Without space= it
+ *                                            lists every space; format html|json|csv.
  *
  * Reporting discipline
  *   A failed read is never rendered as an empty child list. A node with no
@@ -254,7 +263,7 @@ class Pc {
     /* The single place the report version lives. The file header points here and
      * every output channel prints this constant, so a report always names the
      * build that produced it. */
-    static final String VERSION = "0.5"
+    static final String VERSION = "0.6"
 
     /* Node states. A node is not just present or absent: it can be present but
      * unreadable, and the report has to keep those apart.
@@ -2245,6 +2254,14 @@ class Render {
                 after the other, never in parallel, because every export updates the same overview table.
                 Keep this tab open until the run has finished.
             </div>
+            <label class="export-note"><input id="bulkMinimal" type="checkbox" onchange="exportTargetChanged()">
+                <strong>Minimal report</strong>: write a one-row page per space instead, titled
+                <strong>${Pc.html(MinimalReport.title("confluence", "KEY"))}</strong>, with key, name, description,
+                category, administrators, page count, used apps and the number of app and user macros. The macro
+                usage is scanned once at the start of the run, for up to two minutes. Columns added on such a page
+                are topics: they are kept on every later export, added to every other page and shown in a separate
+                summary table on the overview page.
+            </label>
             <div class="export-grid">
                 <button id="bulkRun" class="button" type="button" disabled onclick="startBulk()">Export selected (0)</button>
                 <button id="bulkStop" class="button hidden" type="button" onclick="stopBulk()">Stop after the current space</button>
@@ -2534,6 +2551,7 @@ ${exportSettings(actions)}    <div id="exportStatus" class="export-status muted"
         if (key != null) {
             out.append(" data-key=\"").append(Pc.html(key))
             out.append("\" data-title=\"").append(Pc.html(Cx.title(key))).append("\"")
+            out.append(" data-minimal-title=\"").append(Pc.html(MinimalReport.title("confluence", key))).append("\"")
         }
         out.append(">")
 
@@ -2745,9 +2763,34 @@ function selectedItems() {
     var items = [];
     for (var i = 0; i < rows.length; i++) {
         if (!rows[i].querySelector('.bulk-pick').checked) { continue; }
-        items.push({ key: rows[i].getAttribute('data-key'), title: rows[i].getAttribute('data-title'), row: rows[i] });
+        items.push({ key: rows[i].getAttribute('data-key'), title: rowTitle(rows[i]), row: rows[i] });
     }
     return items;
+}
+/* The minimal report writes other pages, under other titles, into its own summary table.
+   Its rows are read once per run: the macro usage scan covers the whole instance. */
+var minimalRows = null;
+function minimalOn() { var box = el('bulkMinimal'); return !!(box && box.checked); }
+function rowTitle(row) { return row.getAttribute(minimalOn() ? 'data-minimal-title' : 'data-title'); }
+function minimalRow(key) {
+    if (minimalRows === null) {
+        minimalRows = fetch(window.location.pathname + '?report=minimal&format=json',
+                { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (response) {
+            if (!response.ok) { throw new Error('HTTP ' + response.status); }
+            return response.json();
+        }).then(function (body) {
+            var byKey = Object.create(null);
+            var rows = body.rows || [];
+            for (var i = 0; i < rows.length; i++) { byKey[rows[i].space.key] = rows[i]; }
+            return { body: body, byKey: byKey };
+        });
+    }
+    return minimalRows.then(function (all) {
+        var row = all.byKey[key];
+        if (!row) { throw new Error('the space ' + key + ' is not in the minimal report'); }
+        return { report: 'minimal', product: 'confluence', reportVersion: all.body.reportVersion,
+            generatedAt: all.body.generatedAt, instance: all.body.instance, space: row.space, minimal: row.minimal };
+    });
 }
 function selectionChanged() {
     var count = selectedItems().length;
@@ -2777,7 +2820,7 @@ function exportTargetChanged() {
 function loadExported(parentId, spaceKey) {
     var seq = exportedSeq;
     el('exportedNote').textContent = 'Reading the overview on page ' + parentId + '...';
-    exportPost({ action: 'exported', spaceKey: spaceKey, parentPageId: parentId }).then(function (result) {
+    exportPost({ action: 'exported', mode: minimalOn() ? 'minimal' : 'full', spaceKey: spaceKey, parentPageId: parentId }).then(function (result) {
         if (seq !== exportedSeq) { return; }
         var body = result.body || {};
         if (!result.ok || body.ok !== true) {
@@ -2801,7 +2844,7 @@ function paintExported() {
     var rows = bulkRows();
     var marked = 0;
     for (var i = 0; i < rows.length; i++) {
-        var hit = exportedTitles[titleKey(spaceKey, rows[i].getAttribute('data-title'))] === true;
+        var hit = exportedTitles[titleKey(spaceKey, rowTitle(rows[i]))] === true;
         if (hit) { marked++; }
         markRow(rows[i], hit);
     }
@@ -2840,6 +2883,7 @@ function startBulk() {
 }
 function runBulk(items) {
     bulkItems = items;
+    minimalRows = null;
     bulkStopping = false;
     bulkFailed = [];
     var tally = { created: 0, updated: 0, warned: 0, failed: 0 };
@@ -2869,12 +2913,14 @@ function runBulk(items) {
    that could not be read means nothing was sent; a write request that failed in
    transit means the page may or may not have changed, and it says so. */
 function exportOne(item) {
+    var minimal = minimalOn();
     var reportUrl = window.location.pathname + '?space=' + encodeURIComponent(item.key) + '&format=json' + (bulkValues ? '&values=true' : '');
-    return fetch(reportUrl, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (response) {
+    var read = minimal ? minimalRow(item.key) : fetch(reportUrl, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (response) {
         if (!response.ok) { throw new Error('HTTP ' + response.status); }
         return response.json();
-    }).then(function (payload) {
-        payload.options = { values: bulkValues };
+    });
+    return read.then(function (payload) {
+        if (minimal) { payload.mode = 'minimal'; } else { payload.options = { values: bulkValues }; }
         payload.spaceKey = el('exportSpace').value;
         payload.parentPageId = el('exportParent').value.trim();
         payload.parentTitle = payload.parentPageId ? '' : el('exportParentQuery').value.trim();
@@ -2904,7 +2950,7 @@ function writeOutcome(item, result) {
     var exportLog = body.exportLog || {};
     if (exportLog.state === 'recorded') {
         markLogged(item.row, exportLog.label, exportLog.detail);
-    } else {
+    } else if (exportLog.state !== 'skipped') {
         notes.push('EXPORT LOG NOT UPDATED. ' + (exportLog.reason || 'The server did not report it.'));
     }
     var overview = body.overview || { state: 'skipped' };
@@ -3000,6 +3046,7 @@ function retryBulk() {
 function lockTarget(locked) {
     var ids = ['exportSpaceQuery', 'exportParentQuery'];
     for (var i = 0; i < ids.length; i++) { el(ids[i]).disabled = locked; }
+    if (el('bulkMinimal')) { el('bulkMinimal').disabled = locked; }
     el('exportRebuild').disabled = locked || !el('exportParent').value;
     if (!locked) { return; }
     if (exportPageTimer) { window.clearTimeout(exportPageTimer); }
@@ -5330,6 +5377,8 @@ class Cx {
 
 class ConfigOverview {
     static String prefix(String product) { 'cfcon-overview-' + product + '-' }
+    /* The heading of the identity column. The minimal overviews (jiraminimal, confluenceminimal) share it. */
+    static String noun(String product) { product.startsWith('jira') ? 'Project' : 'Space' }
     static String anchor(String name) {
         '<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">' + Cx.esc(name) +
             '</ac:parameter></ac:structured-macro>'
@@ -5387,7 +5436,8 @@ class ConfigOverview {
     static Map<String, Object> read(String body, String product, String space) {
         if (body == null) { throw new IllegalArgumentException('Overview body could not be read.') }
         if (!space) { throw new IllegalArgumentException('Overview space is unknown.') }
-        if (body.contains('cfcon-space-config-export/1') || body.contains('cfcon-project-config-export/1')) {
+        if (body.contains('cfcon-space-config-export/1') || body.contains('cfcon-project-config-export/1') ||
+            body.contains(MinimalReport.JIRA_MARKER) || body.contains(MinimalReport.CONFLUENCE_MARKER)) {
             throw new IllegalArgumentException('A detail export cannot be used as its own overview.')
         }
         List<Map<String, Object>> starts = matches(body, java.util.regex.Pattern.quote(prefix(product) + 'start'))
@@ -5399,7 +5449,8 @@ class ConfigOverview {
             throw new IllegalArgumentException('Overview table markers are missing, duplicated or out of order.')
         }
         String block = body.substring(starts.get(0).end as int, ends.get(0).start as int)
-        def table = java.util.regex.Pattern.compile('(?s)^\\s*<table\\b[^>]*>\\s*<tbody\\b[^>]*>(.*?)</tbody>\\s*</table>\\s*$').matcher(block)
+        /* A minimal overview carries one plain paragraph above its table: the note that the table is generated. */
+        def table = java.util.regex.Pattern.compile('(?s)^\\s*(?:<p>[^<]*</p>\\s*)?<table\\b[^>]*>\\s*<tbody\\b[^>]*>(.*?)</tbody>\\s*</table>\\s*$').matcher(block)
         if (!table.matches()) { throw new IllegalArgumentException('Overview table is malformed.') }
         String tableBody = table.group(1)
         if (tableBody.contains('<table')) { throw new IllegalArgumentException('Overview table is nested.') }
@@ -5429,7 +5480,7 @@ class ConfigOverview {
             if (!keys.add(key)) { throw new IllegalArgumentException('Overview contains duplicate columns.') }
             columns.add([key: key, html: header.get(i)])
         }
-        if (header.isEmpty() || text(header.get(0)) != (product == 'jira' ? 'Project' : 'Space')) {
+        if (header.isEmpty() || text(header.get(0)) != noun(product)) {
             throw new IllegalArgumentException('Overview header is not this exporter\'s header.')
         }
         Set<String> ids = [] as Set
@@ -5483,11 +5534,18 @@ class ConfigOverview {
         List<String> row = [anchor(prefix(product) + 'row-' + pageId) + link(title, space, label, null)]
         for (Map<String, String> column : columns) {
             Map<String, String> section = byKey.get(column.key)
-            row.add(section == null ? '' : link(title, space, section.label + ' (' + section.count + ')', section.anchor))
+            /* A section with html carries its own cell (the minimal overview); every other one links to its anchor. */
+            row.add(section == null ? '' : section.html != null ? section.html :
+                link(title, space, section.label + ' (' + section.count + ')', section.anchor))
         }
         if (found.isEmpty()) { rows.add(row) } else { rows.set(found.get(0), row) }
+        compose(model, product, columns, rows)
+    }
+    static String compose(Map<String, Object> model, String product, List<Map<String, String>> columns, List<List<String>> rows) {
         StringBuilder out = new StringBuilder(model.before.toString())
-        out.append(marker(product, 'start')).append('<table><tbody><tr><th>').append(product == 'jira' ? 'Project' : 'Space').append('</th>')
+        out.append(marker(product, 'start'))
+        if (product.endsWith('minimal')) { out.append('<p>').append(Cx.esc(MinimalReport.OVERVIEW_NOTE)).append('</p>') }
+        out.append('<table><tbody><tr><th>').append(noun(product)).append('</th>')
         columns.each { out.append('<th>').append(it.html).append('</th>') }
         out.append('</tr>')
         rows.each { cells ->
@@ -5509,6 +5567,10 @@ class ConfigOverview {
             int column = columns.findIndexOf { it.key == section.key }
             if (column < 0) { return false }
             String cell = row.get(column + 1)
+            if (section.html != null) {
+                if (text(cell) != text(section.html)) { return false }
+                continue
+            }
             def resource = java.util.regex.Pattern.compile('<ri:page\\b[^>]*/>').matcher(cell)
             def target = java.util.regex.Pattern.compile('<ac:link\\b[^>]*>').matcher(cell)
             if (text(cell) != Cx.plainText(Cx.esc(section.label + ' (' + section.count + ')')) || !resource.find() || !target.find() ||
@@ -5591,7 +5653,7 @@ class ConfigOverview {
 
 class OverviewExport {
     static Map maintain(String product, String parentId, String pageId, String title, String space, String label,
-                        List<Map<String, String>> sections, Closure reader, Closure writer) {
+                        List<Map<String, String>> sections, Closure reader, Closure writer, Closure adjust = null) {
         if (!parentId) { return [state: 'skipped', reason: 'No overview page was selected.'] }
         String stage = 'read'
         try {
@@ -5602,6 +5664,8 @@ class OverviewExport {
                 return [state: 'failed', reason: 'Overview identity, body or version could not be confirmed. ' + (page.error ?: '')]
             }
             String merged = ConfigOverview.upsert(page.storage.toString(), product, pageId, title, space, label, sections)
+            /* The minimal export marks rows of objects that no longer exist; it never removes one. */
+            if (adjust != null) { merged = (String) adjust.call(merged) }
             stage = 'write'
             Map saved
             try { saved = (Map) writer.call(page, merged) }
@@ -5695,6 +5759,296 @@ class OverviewExport {
             totals.put(result, (totals.get(result) ?: 0) + 1)
         }
         totals
+    }
+}
+
+/* The minimal report: one small page per project or space and a summary row on the
+ * overview, with the inventory columns of the requirement and the administrators'
+ * topic columns (Themengebiete). The object page is the source of the topics: every
+ * column there that is not a generated one is carried over verbatim, like a Remark,
+ * and shown on the overview. The overview is a summary and is rewritten from the
+ * pages. Pure and identical in both endpoints; the product names the column set. */
+class MinimalReport {
+    static final String JIRA_MARKER = 'cfcon-project-minimal-export/1'
+    static final String CONFLUENCE_MARKER = 'cfcon-space-minimal-export/1'
+    static final String TOPIC = 'topic:'
+    static final String COLUMN = 'minimal-'
+    static final String GONE = 'NO LONGER EXISTS'
+    /* The topic columns every page starts with while no topic is known yet, as in the requirement. */
+    static final List<String> DEFAULT_TOPICS = ['Themengebiet 1', 'Themengebiet 2']
+    static final String OVERVIEW_NOTE = 'Generated by the minimal report. Fill in topics (Themengebiete) on the page of ' +
+        'each project or space: this table is rewritten from those pages by every export, so a change made here is overwritten.'
+    static final String GONE_LOZENGE = '<ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Red</ac:parameter>' +
+        '<ac:parameter ac:name="title">' + GONE + '</ac:parameter></ac:structured-macro>'
+    static final java.util.regex.Pattern GONE_MARK = java.util.regex.Pattern.compile(
+        '(?s)\\s*<ac:structured-macro\\b(?=[^>]*\\bac:name="status")[^>]*>(?:(?!</ac:structured-macro>).)*?' +
+        java.util.regex.Pattern.quote(GONE) + '(?:(?!</ac:structured-macro>).)*?</ac:structured-macro>')
+    static final java.util.regex.Pattern MERGED = java.util.regex.Pattern.compile('(?i)\\b(?:rowspan|colspan)\\s*=')
+
+    /* Id and heading of every generated column, in page order. The headings are the
+     * requirement's own; they are what the page read recognises. */
+    static final List<List<String>> JIRA_COLUMNS = [
+        ['key', 'Project key'], ['name', 'Projektname'], ['lead', 'Projekt-Lead'], ['admins', 'Projekt-Admins'],
+        ['category', 'Projekt-Kategorie'], ['issues', 'Anzahl Issues'], ['lastUpdate', 'Last Issue Update']]
+    static final List<List<String>> CONFLUENCE_COLUMNS = [
+        ['key', 'Bereichskey'], ['name', 'Bereichsname'], ['description', 'Bereichsbeschreibung'], ['category', 'Kategorie'],
+        ['admins', 'Administratoren'], ['pages', 'Anzahl Seiten'], ['apps', 'Verwendete Apps'],
+        ['appMacros', 'Anzahl App-Makros'], ['userMacros', 'Anzahl User-Makros']]
+
+    static boolean jira(String product) { product == 'jira' }
+    static List<List<String>> columns(String product) { jira(product) ? JIRA_COLUMNS : CONFLUENCE_COLUMNS }
+    static String marker(String product) { jira(product) ? JIRA_MARKER : CONFLUENCE_MARKER }
+    static String overviewProduct(String product) { product + 'minimal' }
+    static String title(String product, String key) {
+        String candidate = (jira(product) ? 'Jira project overview - ' : 'Confluence space overview - ') +
+            (key == null || key.trim().isEmpty() ? 'unknown' : key.trim())
+        candidate.length() > 255 ? candidate.substring(0, 255) : candidate
+    }
+    static String href(String product, String baseUrl, String key) {
+        if (baseUrl == null || baseUrl.trim().isEmpty() || key == null || key.trim().isEmpty()) { return null }
+        String base = baseUrl.trim()
+        while (base.endsWith('/')) { base = base.substring(0, base.length() - 1) }
+        String path = URLEncoder.encode(key.trim(), 'UTF-8').replace('+', '%20')
+        jira(product) ? base + '/projects/' + path + '/issues' : base + '/display/' + path + '/'
+    }
+
+    /* One payload value: [value: text or list, state: read|absent|failed|partial|notMeasured, note].
+     * A failed or unmeasured read says so in the cell; it is never written as empty or zero. */
+    static String shown(Object raw) {
+        Map<String, Object> entry = raw instanceof Map ? (Map<String, Object>) raw : ([value: raw] as Map<String, Object>)
+        Object content = entry.get('value')
+        if (content instanceof Collection) {
+            List<String> parts = []
+            for (Object part : (Collection) content) { if (part != null && !String.valueOf(part).trim().isEmpty()) { parts.add(String.valueOf(part).trim()) } }
+            return parts.join(', ')
+        }
+        content == null ? '' : String.valueOf(content).trim()
+    }
+    static String state(Object raw) {
+        Object value = raw instanceof Map ? ((Map) raw).get('state') : null
+        value == null ? 'read' : String.valueOf(value)
+    }
+    static String cell(String product, String baseUrl, String id, Object raw) {
+        String state = state(raw)
+        Object noteValue = raw instanceof Map ? ((Map) raw).get('note') : null
+        String note = noteValue == null || String.valueOf(noteValue).trim().isEmpty() ? '' : ': ' + String.valueOf(noteValue).trim()
+        if (state == 'failed') { return '<em>' + Cx.esc('unreadable' + note) + '</em>' }
+        if (state == 'notMeasured') { return '<em>' + Cx.esc('not measured' + note) + '</em>' }
+        if (state == 'absent') { return '' }
+        String text = shown(raw)
+        String body = Cx.esc(state == 'partial' && !text.isEmpty() ? text + ' *' : text)
+        String link = id == 'key' ? href(product, baseUrl, text) : null
+        link == null ? body : '<a href="' + Cx.esc(link) + '">' + body + '</a>'
+    }
+
+    static Map<String, Object> refused(String reason) { [ok: false, reason: reason, topics: new LinkedHashMap<String, String>()] as Map<String, Object> }
+
+    /* The topics of an existing object page, header to cell, in page order. Fail closed:
+     * whatever this read cannot place exactly refuses the write, because a topic that
+     * cannot be read is a topic that must not be overwritten. */
+    static Map<String, Object> parse(String storage, String product) {
+        try {
+            if (storage == null || storage.trim().isEmpty()) {
+                return refused('The existing page has an empty body. It was not produced by this export, so it is not overwritten.')
+            }
+            if (!storage.contains(marker(product))) {
+                return refused('The existing page does not carry the export marker "' + marker(product) +
+                    '". It was not produced by this export, so it is not overwritten.')
+            }
+            if (Cx.hasNestedTableBody(storage)) {
+                return refused('A table is nested inside another table on the existing page. Take it out of the topic cell and export again; nothing is written.')
+            }
+            List<String> labels = []
+            for (List<String> column : columns(product)) { labels.add(column.get(1)) }
+            List<List<String>> table = null
+            boolean merged = false
+            int tables = 0
+            java.util.regex.Matcher bodies = Cx.TBODY.matcher(storage)
+            while (bodies.find()) {
+                List<List<String>> rows = []
+                boolean mergedHere = false
+                java.util.regex.Matcher rowMatcher = Cx.ROW.matcher(bodies.group(1))
+                while (rowMatcher.find()) {
+                    if (MERGED.matcher(rowMatcher.group(1)).find()) { mergedHere = true }
+                    rows.add(Cx.cellsOf(rowMatcher.group(1)))
+                }
+                if (rows.isEmpty() || Cx.headerIndex(rows.get(0), labels.get(0)) < 0) { continue }
+                tables++
+                table = rows
+                merged = mergedHere
+            }
+            if (tables != 1 || table == null) {
+                return refused('The existing page carries ' + tables + ' table(s) with the column "' + labels.get(0) +
+                    '" where exactly one is expected. Nothing is written.')
+            }
+            if (merged) { return refused('The table on the existing page uses merged cells, which cannot be carried over safely. Nothing is written.') }
+            List<String> header = table.get(0)
+            Set<Integer> generated = new HashSet<Integer>()
+            for (String label : labels) {
+                List<Integer> found = []
+                for (int i = 0; i < header.size(); i++) { if (Cx.plainText(header.get(i)).equalsIgnoreCase(label)) { found.add(i) } }
+                if (found.size() != 1) {
+                    return refused('The column "' + label + '" is ' + (found.isEmpty() ? 'missing from' : 'repeated on') +
+                        ' the existing page. Restore it and export again; nothing is written.')
+                }
+                generated.add(found.get(0))
+            }
+            List<List<String>> data = []
+            for (int i = 1; i < table.size(); i++) {
+                List<String> cells = table.get(i)
+                if (!cells.every { String value -> Cx.isEmptyCell(value) }) { data.add(cells) }
+            }
+            if (data.size() > 1) { return refused('The table on the existing page carries ' + data.size() + ' data rows where one is expected. Nothing is written.') }
+            List<String> values = data.isEmpty() ? new ArrayList<String>() : data.get(0)
+            if (!values.isEmpty() && values.size() != header.size()) {
+                return refused('The data row of the existing page carries ' + values.size() + ' cell(s) under ' + header.size() + ' heading(s). Nothing is written.')
+            }
+            Map<String, String> topics = new LinkedHashMap<String, String>()
+            Set<String> seen = new HashSet<String>()
+            for (int i = 0; i < header.size(); i++) {
+                if (generated.contains(i)) { continue }
+                String name = Cx.plainText(header.get(i))
+                String value = values.isEmpty() ? '' : values.get(i).trim()
+                boolean empty = Cx.isEmptyCell(value)
+                if (name.isEmpty()) {
+                    if (empty) { continue }
+                    return refused('A column without a heading carries content on the existing page. Give it a heading and export again; nothing is written.')
+                }
+                if (!seen.add(name.toLowerCase(Locale.ROOT))) {
+                    return refused('The topic "' + name + '" appears more than once on the existing page. Nothing is written.')
+                }
+                topics.put(name, empty ? '' : value)
+            }
+            [ok: true, reason: null, topics: topics] as Map<String, Object>
+        } catch (Throwable error) {
+            refused('The topic read failed (' + Cx.errorDetail(error) + '); nothing is written.')
+        }
+    }
+
+    /* The topic headings the overview already holds, in column order. No overview yet is no topic. */
+    static List<String> knownTopics(String overviewBody, String product, String space) {
+        List<String> names = []
+        if (overviewBody == null) { return names }
+        Map<String, Object> model = ConfigOverview.read(overviewBody, overviewProduct(product), space)
+        for (Map<String, String> column : (List<Map<String, String>>) model.columns) {
+            if (column.key.startsWith(TOPIC)) { names.add(column.key.substring(TOPIC.length())) }
+        }
+        names
+    }
+    /* One topic set for every page: the overview's order first, then topics only this page knows.
+     * While neither knows a topic, the set is DEFAULT_TOPICS. */
+    static List<String> topicOrder(List<String> known, Collection<String> onPage) {
+        List<String> order = []
+        Set<String> seen = new HashSet<String>()
+        List<String> all = new ArrayList<String>(known == null ? new ArrayList<String>() : known)
+        if (onPage != null) { all.addAll(onPage) }
+        for (String name : all) {
+            if (name != null && !name.trim().isEmpty() && seen.add(name.trim().toLowerCase(Locale.ROOT))) { order.add(name.trim()) }
+        }
+        order.isEmpty() ? new ArrayList<String>(DEFAULT_TOPICS) : order
+    }
+
+    /* The object page, and the cells of its overview row. item maps a column id to its payload value. */
+    static Map<String, Object> render(String product, String baseUrl, Map<String, Object> item, Map<String, String> pageTopics,
+                                      List<String> knownTopics, String generatedAt, String version) {
+        Map<String, String> byName = new HashMap<String, String>()
+        for (Map.Entry<String, String> entry : pageTopics.entrySet()) { byName.put(entry.getKey().toLowerCase(Locale.ROOT), entry.getValue()) }
+        List<String> topics = topicOrder(knownTopics, pageTopics.keySet())
+        String noun = jira(product) ? 'project' : 'space'
+        StringBuilder out = new StringBuilder()
+        out.append('<p>Overview of ').append(noun).append(' <strong>').append(Cx.esc(shown(item.get('name')) ?: 'unknown'))
+        out.append('</strong> (').append(Cx.esc(shown(item.get('key')) ?: '?')).append('). Generated ')
+        out.append(Cx.esc(generatedAt ?: 'unknown')).append(' by the minimal report v').append(Cx.esc(version ?: '?')).append('.</p>')
+        out.append('<p>Add a column for each topic (Themengebiet) and fill it in on this page. Every column that is not ')
+        out.append('one of the generated ones is kept on the next export and shown on the overview page. Everything else ')
+        out.append('on this page is overwritten each time.</p>')
+        List<Map<String, String>> sections = []
+        StringBuilder head = new StringBuilder('<tr>')
+        StringBuilder row = new StringBuilder('<tr>')
+        for (List<String> column : columns(product)) {
+            String html = cell(product, baseUrl, column.get(0), item.get(column.get(0)))
+            head.append('<th>').append(Cx.esc(column.get(1))).append('</th>')
+            row.append('<td>').append(html).append('</td>')
+            if (column.get(0) != 'name') {
+                sections.add([key: COLUMN + column.get(0), column: column.get(1), label: column.get(1), anchor: '', count: '', html: html] as Map<String, String>)
+            }
+        }
+        for (String topic : topics) {
+            String html = byName.get(topic.toLowerCase(Locale.ROOT)) ?: ''
+            head.append('<th>').append(Cx.esc(topic)).append('</th>')
+            row.append('<td>').append(html).append('</td>')
+            sections.add([key: TOPIC + topic, column: topic, label: topic, anchor: '', count: '', html: html] as Map<String, String>)
+        }
+        out.append('<table><tbody>').append(head).append('</tr>').append(row).append('</tr></tbody></table>')
+        out.append('<p><em>').append(Cx.esc(marker(product))).append('</em></p>')
+        [storage: out.toString(), sections: sections, topics: topics] as Map<String, Object>
+    }
+
+    /* GET ?report=minimal&format=csv: one row per object, the values as the page shows them. */
+    static String csv(String product, List<Map<String, Object>> rows) {
+        StringBuilder out = new StringBuilder()
+        List<String> header = new ArrayList<String>()
+        for (List<String> column : columns(product)) {
+            header.add(Pc.csv(column.get(1)))
+        }
+        out.append(header.join(";")).append("\n")
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> values = Cx.sub(row, "minimal")
+            List<String> cells = new ArrayList<String>()
+            for (List<String> column : columns(product)) {
+                cells.add(Pc.csv(Cx.plainText(cell(product, null, column.get(0), values.get(column.get(0))))))
+            }
+            out.append(cells.join(";")).append("\n")
+        }
+        return out.toString()
+    }
+
+    static String htmlPage(String product, String baseUrl, String heading, String generatedAt, List<Map<String, Object>> rows) {
+        StringBuilder out = new StringBuilder()
+        out.append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n")
+        out.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
+        out.append("<title>").append(Pc.html(heading)).append("</title>\n<style>")
+        out.append("body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:24px;color:#172b4d}")
+        out.append("table{border-collapse:collapse}th,td{border:1px solid #dfe1e6;padding:6px 10px;text-align:left;vertical-align:top}")
+        out.append("th{background:#f4f5f7}em{color:#6b778c}</style>\n</head>\n<body>\n")
+        out.append("<h1>").append(Pc.html(heading)).append("</h1>\n<p>Generated ").append(Pc.html(generatedAt))
+        out.append(" by the minimal report v").append(Pc.html(Pc.VERSION)).append(". A value marked * is a lower bound.</p>\n")
+        out.append("<table><thead><tr>")
+        for (List<String> column : columns(product)) {
+            out.append("<th>").append(Pc.html(column.get(1))).append("</th>")
+        }
+        out.append("</tr></thead><tbody>\n")
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> values = Cx.sub(row, "minimal")
+            out.append("<tr>")
+            for (List<String> column : columns(product)) {
+                out.append("<td>").append(cell(product, baseUrl, column.get(0), values.get(column.get(0)))).append("</td>")
+            }
+            out.append("</tr>\n")
+        }
+        out.append("</tbody></table>\n</body>\n</html>\n")
+        return out.toString()
+    }
+
+    /* Marks the overview rows whose key is not among the existing ones, and unmarks a key
+     * that exists again. Nothing is removed. Without a complete key list nothing changes. */
+    static String markGone(String body, String product, String space, Set<String> existingKeys) {
+        if (existingKeys == null) { return body }
+        String overview = overviewProduct(product)
+        Map<String, Object> model = ConfigOverview.read(body, overview, space)
+        List<Map<String, String>> columns = (List<Map<String, String>>) model.columns
+        List<List<String>> rows = (List<List<String>>) model.rows
+        int keyColumn = columns.findIndexOf { Map<String, String> column -> column.key == COLUMN + 'key' }
+        if (keyColumn < 0) { return body }
+        boolean changed = false
+        for (List<String> cells : rows) {
+            String current = cells.get(keyColumn + 1)
+            String clean = GONE_MARK.matcher(current).replaceAll('')
+            String key = Cx.plainText(clean)
+            String next = key.isEmpty() || existingKeys.contains(key) ? clean : clean + ' ' + GONE_LOZENGE
+            if (next != current) { cells.set(keyColumn + 1, next); changed = true }
+        }
+        changed ? ConfigOverview.compose(model, overview, columns, rows) : body
     }
 }
 
@@ -7373,6 +7727,536 @@ class Scan {
 }
 
 /* =============================================================================
+ * Minimal report
+ *
+ * The reduced report: per space the columns of the requirement, for the one-row
+ * space page and the summary on the overview (see MinimalReport). Everything but
+ * the macro columns is a STORED fact and read by set-based statements over the
+ * whole estate, like the sweep: one statement per column family, none per space.
+ *
+ * The three macro columns come from the macro usage scan of confluenceDCappFootprint,
+ * copied here so this endpoint does not depend on that one being installed: the
+ * macro names of every app that is not system-provided (module descriptors and the
+ * instance-wide macro catalogue), the native user macros, and one MacroUsageQuery
+ * over the content index per name, reading the space key of every hit. It runs once
+ * per request over the whole instance, never once per space.
+ *
+ * The footprint measured that scan on Confluence 10. Every type it needs beyond the
+ * ones this file already imports is resolved by name, so on a Confluence without
+ * them this file still compiles and the three columns say "not measured".
+ * ========================================================================== */
+
+class MinimalScan {
+
+    static final int CAP = 20000
+    static final int DESCRIPTION_CLAMP = 1000
+    static final long MACRO_BUDGET_MS = 120000L
+    static final String PAGE_TYPE = "PAGE"
+    static final String CURRENT = "current"
+
+    static final String SPACE_SQL =
+        "SELECT s.spacekey, s.spacename FROM spaces s ORDER BY s.spacekey"
+
+    /* SPACES.SPACEDESCID is the content row of the space description; its body is the description. */
+    static final String DESCRIPTION_SQL =
+        "SELECT s.spacekey, b.body FROM spaces s JOIN bodycontent b ON b.contentid = s.spacedescid"
+
+    /* A category is a label in the team namespace on the space description, as in the sweep. */
+    static final String CATEGORY_SQL =
+        "SELECT s.spacekey, l.name FROM spaces s JOIN content_label cl ON cl.contentid = s.spacedescid " +
+        "JOIN label l ON l.labelid = cl.labelid WHERE l.namespace = ?"
+
+    /* A space administrator is a SETSPACEPERMISSIONS grant, to a group or to a user. The display
+     * name is a scalar aggregate for the reason given at CREATOR_DISPLAY in confluenceDCspaceInfo. */
+    static final String ADMIN_SQL =
+        "SELECT s.spacekey, p.permgroupname, p.permusername, su.username, " +
+        "(SELECT MAX(dc.display_name) FROM cwd_user dc WHERE dc.lower_user_name = LOWER(su.username)) AS userdisplay " +
+        "FROM spacepermissions p JOIN spaces s ON s.spaceid = p.spaceid " +
+        "LEFT JOIN user_mapping su ON su.user_key = p.permusername WHERE p.permtype = ?"
+
+    /* Current pages, counted as confluenceDCspaceInfo counts them. */
+    static final String PAGE_SQL =
+        "SELECT s.spacekey, COUNT(c.contentid) AS pages FROM spaces s JOIN content c ON c.spaceid = s.spaceid " +
+        "WHERE c.contenttype = ? AND c.content_status = ? AND c.prevver IS NULL GROUP BY s.spacekey"
+
+    /* One side statement into a map of space key to values. A failure costs its columns and says why. */
+    static Map<String, Object> side(Connection connection, Map<String, List<String>> shapes, String sql,
+                                    List<String> arguments, List<String> columns) {
+        Map<String, Object> out = new LinkedHashMap<String, Object>()
+        out.put("rows", new ArrayList<Map<String, String>>())
+        out.put("failure", null)
+        for (Map.Entry<String, List<String>> shape : shapes.entrySet()) {
+            String problem = Db.shapeProblem(Db.shape(connection, shape.getKey(), shape.getValue()))
+            if (problem != null) {
+                out.put("failure", problem)
+                return out
+            }
+        }
+        Map<String, Object> found = Db.query(connection, sql, arguments, columns, CAP)
+        if (Pc.text(found.get("failure")) != null) {
+            out.put("failure", found.get("failure"))
+        } else if (Boolean.TRUE.equals(found.get("truncated"))) {
+            out.put("failure", "More than " + String.valueOf(CAP) + " rows, past this report's own cap.")
+        } else {
+            out.put("rows", found.get("rows"))
+        }
+        return out
+    }
+
+    static Map<String, Object> failedValue(Object failure) {
+        return [state: "failed", note: String.valueOf(failure)] as Map<String, Object>
+    }
+
+    /* Every space, or the one named, with its stored values. keys is the complete key list,
+     * or null when the space list could not be read. */
+    static Map<String, Object> rows(Connection connection, String onlyKey) {
+        Map<String, Object> out = new LinkedHashMap<String, Object>()
+        List<Map<String, Object>> rows = new ArrayList<Map<String, Object>>()
+        out.put("rows", rows)
+        out.put("keys", null)
+        out.put("failure", null)
+        if (connection == null) {
+            out.put("failure", "No database connection was available, so no space was read.")
+            return out
+        }
+        Map<String, Object> spaces = side(connection, [spaces: ["spacekey", "spacename"]], SPACE_SQL, [],
+            ["spacekey", "spacename"])
+        if (spaces.get("failure") != null) {
+            out.put("failure", spaces.get("failure"))
+            return out
+        }
+        Map<String, Object> descriptions = side(connection, [spaces: ["spacekey", "spacedescid"], bodycontent: ["contentid", "body"]],
+            DESCRIPTION_SQL, [], ["spacekey", "body"])
+        Map<String, Object> categories = side(connection,
+            [spaces: ["spacekey", "spacedescid"], content_label: ["labelid", "contentid"], label: ["labelid", "name", "namespace"]],
+            CATEGORY_SQL, [Scan.CATEGORY_NAMESPACE], ["spacekey", "name"])
+        Map<String, Object> admins = side(connection,
+            [spacepermissions: ["spaceid", "permtype", "permgroupname", "permusername"], user_mapping: ["user_key", "username"],
+             cwd_user: ["lower_user_name", "display_name"]],
+            ADMIN_SQL, [Scan.ADMIN_PERMISSION], ["spacekey", "permgroupname", "permusername", "username", "userdisplay"])
+        Map<String, Object> pages = side(connection, [content: ["contentid", "spaceid", "contenttype", "content_status", "prevver"]],
+            PAGE_SQL, [PAGE_TYPE, CURRENT], ["spacekey", "pages"])
+
+        Map<String, String> descriptionOf = new HashMap<String, String>()
+        for (Map<String, String> row : (List<Map<String, String>>) descriptions.get("rows")) {
+            String text = Cx.plainText(row.get("body"))
+            descriptionOf.put(row.get("spacekey"), text.length() > DESCRIPTION_CLAMP ? text.substring(0, DESCRIPTION_CLAMP) + " [...]" : text)
+        }
+        Map<String, List<String>> categoryOf = new HashMap<String, List<String>>()
+        for (Map<String, String> row : (List<Map<String, String>>) categories.get("rows")) {
+            addTo(categoryOf, row.get("spacekey"), Pc.text(row.get("name")))
+        }
+        Map<String, List<String>> adminOf = new HashMap<String, List<String>>()
+        for (Map<String, String> row : (List<Map<String, String>>) admins.get("rows")) {
+            String group = Pc.text(row.get("permgroupname"))
+            String user = Pc.text(row.get("userdisplay"))
+            if (user == null) { user = Pc.text(row.get("username")) }
+            if (user == null) { user = Pc.text(row.get("permusername")) }
+            addTo(adminOf, row.get("spacekey"), group != null ? group : user)
+        }
+        Map<String, String> pagesOf = new HashMap<String, String>()
+        for (Map<String, String> row : (List<Map<String, String>>) pages.get("rows")) {
+            pagesOf.put(row.get("spacekey"), Pc.text(row.get("pages")))
+        }
+
+        Set<String> keys = new LinkedHashSet<String>()
+        for (Map<String, String> row : (List<Map<String, String>>) spaces.get("rows")) {
+            String key = Pc.text(row.get("spacekey"))
+            if (key == null) {
+                continue
+            }
+            keys.add(key)
+            if (onlyKey != null && !onlyKey.equalsIgnoreCase(key)) {
+                continue
+            }
+            Map<String, Object> values = new LinkedHashMap<String, Object>()
+            values.put("key", [value: key])
+            values.put("name", [value: row.get("spacename")])
+            values.put("description", descriptions.get("failure") != null ? failedValue(descriptions.get("failure"))
+                : textValue(descriptionOf.get(key)))
+            values.put("category", categories.get("failure") != null ? failedValue(categories.get("failure"))
+                : listValue(categoryOf.get(key)))
+            values.put("admins", admins.get("failure") != null ? failedValue(admins.get("failure"))
+                : listValue(adminOf.get(key)))
+            values.put("pages", pages.get("failure") != null ? failedValue(pages.get("failure"))
+                : [value: pagesOf.containsKey(key) ? pagesOf.get(key) : "0"])
+            Map<String, Object> entry = new LinkedHashMap<String, Object>()
+            entry.put("space", [key: key, name: row.get("spacename")])
+            entry.put("minimal", values)
+            rows.add(entry)
+        }
+        out.put("keys", keys)
+        return out
+    }
+
+    static void addTo(Map<String, List<String>> target, String key, String value) {
+        if (key == null || value == null) {
+            return
+        }
+        List<String> list = target.get(key)
+        if (list == null) {
+            list = new ArrayList<String>()
+            target.put(key, list)
+        }
+        if (!list.contains(value)) {
+            list.add(value)
+            list.sort(String.CASE_INSENSITIVE_ORDER)
+        }
+    }
+
+    static Map<String, Object> textValue(String text) {
+        return text == null || text.trim().isEmpty() ? [state: "absent"] as Map<String, Object> : [value: text] as Map<String, Object>
+    }
+
+    static Map<String, Object> listValue(List<String> values) {
+        return values == null || values.isEmpty() ? [state: "absent"] as Map<String, Object> : [value: values] as Map<String, Object>
+    }
+
+    /* ---- the macro usage scan ------------------------------------------------ */
+
+    static final String QUERY = "com.atlassian.confluence.search.v2.query.MacroUsageQuery"
+    static final String METADATA_SOURCE = "com.atlassian.confluence.macro.browser.MacroMetadataSource"
+    static final String CATALOG = "com.atlassian.confluence.macro.browser.MacroMetadataManager"
+    static final String ACCESSOR = "com.atlassian.plugin.PluginAccessor"
+    static final String PLUGIN_METADATA = "com.atlassian.plugin.metadata.PluginMetadataManager"
+    static final String USER_MACROS = "com.atlassian.confluence.renderer.UserMacroLibrary"
+
+    static Object invoke(Object target, String method, Object[] arguments) {
+        return InvokerHelper.invokeMethod(target, method, arguments)
+    }
+
+    static String text(Object value) {
+        return value == null ? null : Pc.text(value.toString())
+    }
+
+    /* Macro names per plugin key from the instance-wide catalogue, as MacroCatalog in the footprint. */
+    static Map<String, Set<String>> catalog(List<String> gaps) {
+        Map<String, Set<String>> byPlugin = new HashMap<String, Set<String>>()
+        try {
+            Object manager = ComponentLocator.getComponent(Class.forName(CATALOG))
+            Object all = manager == null ? null : invoke(manager, "getAllMacroMetadata", new Object[0])
+            if (!(all instanceof Collection)) {
+                gaps.add("the macro catalogue gave no list")
+                return byPlugin
+            }
+            for (Object entry : (Collection) all) {
+                String name = null
+                String plugin = null
+                try {
+                    name = text(invoke(entry, "getMacroName", new Object[0]))
+                    plugin = text(invoke(entry, "getPluginKey", new Object[0]))
+                } catch (Throwable ignored) {
+                    continue
+                }
+                if (name != null && plugin != null) {
+                    if (!byPlugin.containsKey(plugin)) {
+                        byPlugin.put(plugin, new LinkedHashSet<String>())
+                    }
+                    byPlugin.get(plugin).add(name)
+                }
+            }
+        } catch (Throwable error) {
+            gaps.add("the macro catalogue could not be read (" + Db.why(error) + ")")
+        }
+        return byPlugin
+    }
+
+    /* Per space key: the apps with a used macro, the distinct app macros and the distinct user
+     * macros used there. state is measured, partial (a lower bound: budget or a failed name) or
+     * failed (nothing measured, note says why). */
+    static Map<String, Object> macros(long budgetMs) {
+        Map<String, Object> out = new LinkedHashMap<String, Object>()
+        Map<String, Set<String>> apps = new HashMap<String, Set<String>>()
+        Map<String, Set<String>> appMacros = new HashMap<String, Set<String>>()
+        Map<String, Set<String>> userMacros = new HashMap<String, Set<String>>()
+        out.put("state", "failed")
+        out.put("note", null)
+        out.put("apps", apps)
+        out.put("appMacros", appMacros)
+        out.put("userMacros", userMacros)
+        long deadline = budgetMs <= 0 ? Long.MAX_VALUE : System.currentTimeMillis() + budgetMs
+
+        java.lang.reflect.Constructor queryConstructor
+        SearchManager searchManager
+        try {
+            queryConstructor = Class.forName(QUERY).getConstructor(String)
+            searchManager = ComponentLocator.getComponent(SearchManager)
+        } catch (Throwable error) {
+            out.put("note", "this Confluence offers no macro usage query (" + Db.why(error) + ")")
+            return out
+        }
+        if (searchManager == null) {
+            out.put("note", "the search manager is not available")
+            return out
+        }
+
+        List<String> gaps = new ArrayList<String>()
+        Map<String, Set<String>> owners = new LinkedHashMap<String, Set<String>>()
+        try {
+            Object accessor = ComponentLocator.getComponent(Class.forName(ACCESSOR))
+            Object pluginMetadata = null
+            try {
+                pluginMetadata = ComponentLocator.getComponent(Class.forName(PLUGIN_METADATA))
+            } catch (Throwable ignored) {
+                pluginMetadata = null
+            }
+            Class sourceType = null
+            try {
+                sourceType = Class.forName(METADATA_SOURCE)
+            } catch (Throwable ignored) {
+                sourceType = null
+            }
+            Map<String, Set<String>> catalogNames = catalog(gaps)
+            Object plugins = invoke(accessor, "getPlugins", new Object[0])
+            for (Object plugin : (Collection) plugins) {
+                String key = text(invoke(plugin, "getKey", new Object[0]))
+                Object system = null
+                try {
+                    system = pluginMetadata == null ? null : invoke(pluginMetadata, "isSystemProvided", [plugin] as Object[])
+                } catch (Throwable ignored) {
+                    system = null
+                }
+                if (Boolean.TRUE.equals(system)) {
+                    continue
+                }
+                String appName = text(invoke(plugin, "getName", new Object[0]))
+                if (appName == null) {
+                    appName = key
+                }
+                Set<String> names = new LinkedHashSet<String>()
+                Object descriptors = null
+                try {
+                    descriptors = invoke(plugin, "getModuleDescriptors", new Object[0])
+                } catch (Throwable ignored) {
+                    descriptors = null
+                }
+                if (descriptors instanceof Collection && sourceType != null) {
+                    for (Object descriptor : (Collection) descriptors) {
+                        if (!sourceType.isInstance(descriptor)) {
+                            continue
+                        }
+                        String name = null
+                        try {
+                            Object metadata = invoke(descriptor, "getMacroMetadata", new Object[0])
+                            name = metadata == null ? null : text(invoke(metadata, "getMacroName", new Object[0]))
+                        } catch (Throwable ignored) {
+                            name = null
+                        }
+                        if (name == null) {
+                            name = text(invoke(descriptor, "getKey", new Object[0]))
+                        }
+                        if (name != null) {
+                            names.add(name)
+                        }
+                    }
+                }
+                if (key != null && catalogNames.containsKey(key)) {
+                    names.addAll(catalogNames.get(key))
+                }
+                for (String name : names) {
+                    if (!owners.containsKey(name)) {
+                        owners.put(name, new LinkedHashSet<String>())
+                    }
+                    owners.get(name).add(appName)
+                }
+            }
+        } catch (Throwable error) {
+            out.put("note", "the installed apps could not be read (" + Db.why(error) + ")")
+            return out
+        }
+
+        Set<String> userNames = new LinkedHashSet<String>()
+        try {
+            Object library = ComponentLocator.getComponent(Class.forName(USER_MACROS))
+            Object configured = library == null ? null : invoke(library, "getMacros", new Object[0])
+            if (configured instanceof Map) {
+                for (Object entry : ((Map) configured).entrySet()) {
+                    Map.Entry pair = (Map.Entry) entry
+                    String name = null
+                    try {
+                        name = pair.getValue() == null ? null : text(invoke(pair.getValue(), "getName", new Object[0]))
+                    } catch (Throwable ignored) {
+                        name = null
+                    }
+                    if (name == null) {
+                        name = text(pair.getKey())
+                    }
+                    if (name != null) {
+                        userNames.add(name)
+                    }
+                }
+            } else {
+                gaps.add("the user macro library gave no list")
+            }
+        } catch (Throwable error) {
+            gaps.add("the user macros could not be read (" + Db.why(error) + ")")
+        }
+
+        final String spaceKeyField = SearchFieldMappings.SPACE_KEY.getName()
+        final Set<String> requestedFields = new LinkedHashSet<String>()
+        requestedFields.add(spaceKeyField)
+        Set<String> scanNames = new LinkedHashSet<String>(owners.keySet())
+        scanNames.addAll(userNames)
+        Map<String, Set<String>> spacesOf = new HashMap<String, Set<String>>()
+        int failedNames = 0
+        int skippedNames = 0
+        for (String name : scanNames) {
+            if (System.currentTimeMillis() > deadline) {
+                skippedNames++
+                continue
+            }
+            final Set<String> spaces = new HashSet<String>()
+            try {
+                searchManager.scan(
+                    Collections.singletonList(Index.CONTENT),
+                    (SearchQuery) queryConstructor.newInstance(name),
+                    requestedFields,
+                    new java.util.function.Consumer<Map<String, String[]>>() {
+                        @Override
+                        void accept(Map<String, String[]> document) {
+                            String spaceKey = Cw.firstIndexValue(document, spaceKeyField)
+                            if (spaceKey != null && !spaceKey.trim().isEmpty()) {
+                                spaces.add(spaceKey.trim())
+                            }
+                        }
+                    }
+                )
+                spacesOf.put(name, spaces)
+            } catch (Throwable ignored) {
+                failedNames++
+            }
+        }
+
+        for (Map.Entry<String, Set<String>> owner : owners.entrySet()) {
+            for (String space : (spacesOf.get(owner.getKey()) ?: new HashSet<String>())) {
+                addSet(appMacros, space, owner.getKey())
+                for (String app : owner.getValue()) {
+                    addSet(apps, space, app)
+                }
+            }
+        }
+        for (String name : userNames) {
+            for (String space : (spacesOf.get(name) ?: new HashSet<String>())) {
+                addSet(userMacros, space, name)
+            }
+        }
+
+        if (skippedNames > 0) {
+            gaps.add(String.valueOf(skippedNames) + " macro name(s) not scanned within the " +
+                String.valueOf(budgetMs / 1000L) + " s budget")
+        }
+        if (failedNames > 0) {
+            gaps.add(String.valueOf(failedNames) + " macro name(s) whose scan failed")
+        }
+        out.put("state", gaps.isEmpty() ? "measured" : "partial")
+        out.put("note", gaps.isEmpty() ? null : gaps.join("; "))
+        return out
+    }
+
+    static void addSet(Map<String, Set<String>> target, String key, String value) {
+        if (!target.containsKey(key)) {
+            target.put(key, new TreeSet<String>(String.CASE_INSENSITIVE_ORDER))
+        }
+        target.get(key).add(value)
+    }
+
+    /* The three macro columns of one space, from one scan. */
+    static void addMacros(Map<String, Object> values, String key, Map<String, Object> scan) {
+        String state = String.valueOf(scan.get("state"))
+        if (state == "failed") {
+            Map<String, Object> missing = [state: "notMeasured", note: scan.get("note")] as Map<String, Object>
+            values.put("apps", missing)
+            values.put("appMacros", missing)
+            values.put("userMacros", missing)
+            return
+        }
+        Set<String> apps = ((Map<String, Set<String>>) scan.get("apps")).get(key)
+        Set<String> appMacros = ((Map<String, Set<String>>) scan.get("appMacros")).get(key)
+        Set<String> userMacros = ((Map<String, Set<String>>) scan.get("userMacros")).get(key)
+        String shownState = state == "partial" ? "partial" : "read"
+        values.put("apps", apps == null || apps.isEmpty()
+            ? [state: state == "partial" ? "partial" : "absent", value: ""] as Map<String, Object>
+            : [state: shownState, value: new ArrayList<String>(apps), note: scan.get("note")] as Map<String, Object>)
+        values.put("appMacros", [state: shownState, value: String.valueOf(appMacros == null ? 0 : appMacros.size()),
+            note: scan.get("note")] as Map<String, Object>)
+        values.put("userMacros", [state: shownState, value: String.valueOf(userMacros == null ? 0 : userMacros.size()),
+            note: scan.get("note")] as Map<String, Object>)
+    }
+
+    /* GET ?report=minimal. With space= one space, without it every space. A read; it never
+     * writes. The bulk export reads every space once and posts each row on its own. */
+    static Object respond(Class responseClass, Report report, Object executorFactory, String executorFailure,
+                          String spaceKey, String format, long started) {
+        Map<String, Object> read
+        if (executorFactory == null) {
+            read = [failure: executorFailure, rows: [], keys: null] as Map<String, Object>
+        } else {
+            try {
+                read = (Map<String, Object>) Db.withConnection(executorFactory, { Connection connection -> rows(connection, spaceKey) })
+            } catch (Throwable error) {
+                read = [failure: "The read-only connection failed: " + Db.why(error), rows: [], keys: null] as Map<String, Object>
+            }
+        }
+        if (read.get("failure") != null) {
+            Map<String, Object> failed = [ok: false, error: String.valueOf(read.get("failure")) +
+                " This is a failed read, not an instance without spaces."] as Map<String, Object>
+            return Http.build(responseClass, 500, JsonOutput.prettyPrint(JsonOutput.toJson(failed)), Http.JSON, null)
+        }
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) read.get("rows")
+        if (spaceKey != null && rows.isEmpty()) {
+            Map<String, Object> missing = [ok: false, error: "No space with key " + spaceKey + " was found."] as Map<String, Object>
+            return Http.build(responseClass, 404, JsonOutput.prettyPrint(JsonOutput.toJson(missing)), Http.JSON, null)
+        }
+        Map<String, Object> scan = macros(MACRO_BUDGET_MS)
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> values = (Map<String, Object>) row.get("minimal")
+            addMacros(values, Pc.text(((Map) row.get("space")).get("key")), scan)
+        }
+        String generatedAt = Pc.timestamp()
+        if (format == "csv") {
+            return Http.ok(responseClass, MinimalReport.csv("confluence", rows), Http.CSV)
+        }
+        if (format == "json") {
+            Map<String, Object> payload = new LinkedHashMap<String, Object>()
+            payload.put("ok", Boolean.TRUE)
+            payload.put("report", "minimal")
+            payload.put("product", "confluence")
+            payload.put("reportVersion", Pc.VERSION)
+            payload.put("generatedAt", generatedAt)
+            payload.put("instance", [title: report.instanceTitle, baseUrl: report.instanceBaseUrl,
+                confluenceVersion: report.confluenceVersion])
+            payload.put("macroScan", [state: scan.get("state"), note: scan.get("note")])
+            if (spaceKey != null) {
+                payload.put("space", rows.get(0).get("space"))
+                payload.put("minimal", rows.get(0).get("minimal"))
+            } else {
+                payload.put("rows", rows)
+            }
+            payload.put("executionMs", Long.valueOf(System.currentTimeMillis() - started))
+            return Http.ok(responseClass, JsonOutput.prettyPrint(JsonOutput.toJson(payload)), Http.JSON)
+        }
+        return Http.ok(responseClass, MinimalReport.htmlPage("confluence", report.instanceBaseUrl,
+            "Confluence spaces, minimal report", generatedAt, rows), Http.HTML)
+    }
+
+    /* Every space key of the instance, for marking overview rows of spaces that are gone.
+     * Null when the list could not be read: an incomplete list marks nothing. */
+    static Set<String> existingKeys(Connection connection) {
+        Map<String, Object> spaces = side(connection, [spaces: ["spacekey"]], "SELECT s.spacekey FROM spaces s", [], ["spacekey"])
+        if (spaces.get("failure") != null) {
+            return null
+        }
+        Set<String> keys = new HashSet<String>()
+        for (Map<String, String> row : (List<Map<String, String>>) spaces.get("rows")) {
+            if (Pc.text(row.get("spacekey")) != null) {
+                keys.add(row.get("spacekey"))
+            }
+        }
+        return keys
+    }
+}
+
+/* =============================================================================
  * REST Endpoint
  *
  * The two-argument closure form is the one MEASURED on this instance: the
@@ -7459,6 +8343,12 @@ spaceConfig(
     Map<String, Object> executor = Db.factory()
     Object executorFactory = executor.get("factory")
     String executorFailure = Pc.text(executor.get("failure"))
+
+    /* ---- Minimal report: its own representation, inventory and full report untouched */
+
+    if (Pc.stringParam(queryParams, "report", "full").toLowerCase(Locale.ROOT) == "minimal") {
+        return MinimalScan.respond(responseClass, report, executorFactory, executorFailure, spaceKey, format, started)
+    }
 
     /* ---- No space named: sweep the whole estate ---------------------------
      *
@@ -8296,7 +9186,9 @@ spaceConfig(
         }
         List<Map<String, String>> exportedRows
         try {
-            exportedRows = ConfigOverview.exported(exportedPage.getBodyAsString(), "confluence", exportedPageSpace)
+            exportedRows = ConfigOverview.exported(exportedPage.getBodyAsString(),
+                Cx.str(request, "mode", "full") == "minimal" ? MinimalReport.overviewProduct("confluence") : "confluence",
+                exportedPageSpace)
         } catch (IllegalArgumentException refusal) {
             return refuse(409, "exported", "The overview table on page " + exportedParent +
                 " cannot be read: " + refusal.getMessage())
@@ -8478,8 +9370,28 @@ spaceConfig(
         return refuse(400, "validate", "The page title exceeds " +
             String.valueOf(Cx.MAX_TITLE_CHARS) + " characters.")
     }
-    if (Cx.rowsOf(request, "sections").isEmpty()) {
+    /* mode "minimal" is the reduced report: its payload is one row of the GET ?report=minimal
+     * JSON, and it writes the one-row space page and the summary overview. */
+    boolean minimalMode = Cx.str(request, "mode", "full").toLowerCase(Locale.ROOT) == "minimal"
+    if (minimalMode && Cx.sub(request, "minimal").isEmpty()) {
+        return refuse(400, "validate", "The minimal export payload carries no values. Nothing is written.")
+    }
+    if (!minimalMode && Cx.rowsOf(request, "sections").isEmpty()) {
         return refuse(400, "validate", "The export payload carries no section. Nothing is written.")
+    }
+    /* Every space key of this instance, read before the write and outside its transaction, so
+     * the summary can mark the rows of spaces that are gone. Null marks nothing. */
+    Set<String> minimalExisting = null
+    if (minimalMode) {
+        try {
+            Object keyFactory = Db.factory().get("factory")
+            if (keyFactory != null) {
+                minimalExisting = (Set<String>) Db.withConnection(keyFactory, { java.sql.Connection connection ->
+                    MinimalScan.existingKeys(connection) })
+            }
+        } catch (Throwable ignored) {
+            minimalExisting = null
+        }
     }
 
     PageManager pageManager = null
@@ -8585,6 +9497,7 @@ spaceConfig(
             }
 
             RemarkRead read = new RemarkRead()
+            Map<String, String> pageTopics = new LinkedHashMap<String, String>()
             if (existingPage != null) {
                 String existingStorage = null
                 try {
@@ -8593,7 +9506,18 @@ spaceConfig(
                     return refuse(409, "read", "The body of the existing page could not be read (" +
                         Cx.errorDetail(error) + "). Nothing is written, so no remark can be lost.")
                 }
-                read = Cx.parseRemarks(existingStorage)
+                if (minimalMode) {
+                    /* The topics take the place of the remarks, with the same fail-closed gate. */
+                    Map<String, Object> topicRead = MinimalReport.parse(existingStorage, "confluence")
+                    if (topicRead.get("ok") == Boolean.TRUE) {
+                        read.outcome = RemarkRead.PARSED
+                        pageTopics = (Map<String, String>) topicRead.get("topics")
+                    } else {
+                        read.fail(String.valueOf(topicRead.get("reason")))
+                    }
+                } else {
+                    read = Cx.parseRemarks(existingStorage)
+                }
                 read.pageId = existingPage.getIdAsString()
                 read.pageVersion = existingPage.getVersion()
             }
@@ -8679,7 +9603,41 @@ spaceConfig(
             }
             request.put("instance", instanceMap)
 
-            ExportOutcome outcome = Cx.render(request, read)
+            ExportOutcome outcome
+            List<String> minimalTopics = new ArrayList<String>()
+            if (minimalMode) {
+                /* One topic set: the summary knows every topic an earlier export found, and
+                 * this page is seeded with the ones it lacks. */
+                List<String> knownTopics = new ArrayList<String>()
+                String knownTopicsProblem = null
+                if (parentPage != null) {
+                    try {
+                        Map known = (Map) overviewRead(pageService, parentPage.getIdAsString())
+                        if (known.get("ok") == Boolean.TRUE && known.get("storage") != null) {
+                            knownTopics = MinimalReport.knownTopics(String.valueOf(known.get("storage")), "confluence", spaceKey)
+                        }
+                    } catch (Exception error) {
+                        knownTopicsProblem = "The topics of the overview could not be read (" + Cx.errorDetail(error) +
+                            "), so this page was not seeded with them."
+                    }
+                }
+                Map<String, Object> rendered = MinimalReport.render("confluence", identity.get("baseUrl"),
+                    Cx.sub(request, "minimal"), pageTopics, knownTopics, Pc.timestamp(), Pc.VERSION)
+                outcome = new ExportOutcome()
+                outcome.storage = (String) rendered.get("storage")
+                outcome.sections = (List<Map<String, String>>) rendered.get("sections")
+                minimalTopics = (List<String>) rendered.get("topics")
+                outcome.remarksRead = pageTopics.size()
+                outcome.remarksCarried = pageTopics.size()
+                if (knownTopicsProblem != null) {
+                    outcome.warnings.add(knownTopicsProblem)
+                }
+                if (minimalExisting == null) {
+                    outcome.warnings.add("The space list could not be read completely, so no overview row was marked as no longer existing.")
+                }
+            } else {
+                outcome = Cx.render(request, read)
+            }
 
             String action = existingPage == null ? "created" : "updated"
             int writtenVersion = existingPage == null ? 1 : read.pageVersion + 1
@@ -8813,15 +9771,18 @@ spaceConfig(
 
             Map<String, Object> spaceIdentity = Cx.sub(request, "space")
             String overviewLabel = Cx.str(spaceIdentity, "name", Cx.str(spaceIdentity, "key", title))
-            Map overview = OverviewExport.maintain("confluence", requestedParentId, pageId, title, spaceKey, overviewLabel,
-                outcome.sections,
+            Map overview = OverviewExport.maintain(minimalMode ? MinimalReport.overviewProduct("confluence") : "confluence",
+                requestedParentId, pageId, title, spaceKey, overviewLabel, outcome.sections,
                 { -> overviewRead(pageService, requestedParentId) },
-                { Map page, String storage -> overviewSave(pageManager, page, storage) })
+                { Map page, String storage -> overviewSave(pageManager, page, storage) },
+                minimalMode ? { String merged -> MinimalReport.markGone(merged, "confluence", spaceKey, minimalExisting) } : null)
 
             Map<String, Object> response = new LinkedHashMap<String, Object>()
             response.put("ok", Boolean.TRUE)
             response.put("written", Boolean.TRUE)
             response.put("action", action)
+            response.put("mode", minimalMode ? "minimal" : "full")
+            response.put("topics", minimalTopics)
             response.put("spaceKey", spaceKey)
             response.put("title", title)
             response.put("pageId", pageId)
@@ -8850,7 +9811,10 @@ spaceConfig(
         if (committed == null) {
             return finished
         }
-        committed.put("exportLog", recordExport(Cx.str(Cx.sub(request, "space"), "key", ""), committed))
+        /* The log marks full exports in the inventory; a minimal page is not one. */
+        committed.put("exportLog", minimalMode
+            ? [state: "skipped", reason: "The minimal report is not recorded in the export log."] as Map<String, Object>
+            : recordExport(Cx.str(Cx.sub(request, "space"), "key", ""), committed))
         return answer(committed)
     } catch (PageExportRejected rejected) {
         return rejected.response

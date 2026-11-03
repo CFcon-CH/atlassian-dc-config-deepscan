@@ -4,6 +4,56 @@ All notable changes to this project are documented here. Each endpoint carries i
 version, declared once in its helper class and printed by every output channel, so the
 sections below are grouped by endpoint rather than by a single repository version.
 
+## confluenceDCspaceConfig 0.6 and jiraDCprojectConfig 0.6
+
+### Added
+
+- **Minimal report.** `report=minimal` on both endpoints returns a reduced inventory as HTML,
+  JSON or CSV, for every project or space or, with `project=`/`space=`, for one. Jira: key
+  (linked to the project's issues), name, lead, the actors of the project role Administrators,
+  category, issue count and the date of the latest issue update. Confluence: key (linked to the
+  space), name, description, categories, `SETSPACEPERMISSIONS` holders, current page count,
+  apps with a used macro, distinct app macros and distinct user macros.
+- **Minimal export.** The bulk export has a **Minimal report** switch. It writes one page per
+  project or space, titled `Jira project overview - KEY` or `Confluence space overview - KEY`,
+  with one table of one row, and keeps a separate summary table on the selected parent. The
+  write goes through the existing route (`mode: "minimal"`), the same target selection, parent
+  rules, gates and transport; in Confluence inside the same export transaction.
+- **Topics (Themengebiete).** Every column an administrator adds on an object page is kept
+  verbatim on the next export, fail-closed like the Remark carry-over. A topic found on one page
+  joins the summary and is seeded, empty, onto every page exported afterwards, so all pages
+  carry one topic set. The summary shows each page's topics and is rewritten from the pages.
+  While no topic is known yet, every page and the summary start with **Themengebiet 1** and
+  **Themengebiet 2**.
+- Summary rows of projects or spaces that no longer exist are kept and marked
+  `NO LONGER EXISTS`, given a complete key list; archived Jira projects count as existing.
+- Confluence's macro columns use the macro usage scan of `confluenceDCappFootprint`, built in and
+  resolved by name, with a 120-second budget. A budget-limited or partly failed scan is shown as
+  a lower bound with `*`; a Confluence without the macro usage query shows `not measured`.
+
+### Changed
+
+- The pure helper `MinimalReport` is embedded identically in both endpoints. `ConfigOverview`
+  accepts cells with their own markup and a generated-table note above the minimal summary, and
+  refuses minimal pages as an overview. `OverviewExport.maintain` takes an optional adjust step.
+- The minimal report is the only place in projectConfig that reads issue data (issue count and
+  latest update) and the only place in spaceConfig that counts pages or queries the content index
+  for macros. The full reports are unchanged.
+- The minimal export writes no export log entry, so the blue log marks keep showing full exports.
+
+### Validation
+
+- Offline: page rendering, topic carry-over, topic set seeding, editor normalisation, every
+  fail-closed refusal, marker separation from full pages, the summary with its coexistence next to
+  the full overview, rows of objects that no longer exist, the Jira collectors against platform
+  stubs (including the search fallback), the Confluence statements and macro scan against stubs,
+  and the minimal lifecycle through the actual Confluence export transaction. Byte parity of the
+  shared helpers and all existing suites pass.
+- Not measured on an instance: `SearchService.searchOverrideSecurity` and the `SearchResults`
+  getter (the Jira Javadoc was not reachable; both are called dynamically), the Confluence
+  statements on a live schema, the macro scan outside Confluence 10, and the editor round trip of
+  topic columns.
+
 ## dashboardFilterEditor 1.3.1
 
 ### Changed

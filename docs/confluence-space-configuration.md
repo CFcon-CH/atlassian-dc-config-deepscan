@@ -25,6 +25,7 @@ Both the GET and POST routes are restricted to `confluence-administrators`.
 | `format=html\|json\|csv` | `html` | Representation for one space. |
 | `depth=collapsed\|full` | `collapsed` | Initial node expansion. `full` can make a large response. |
 | `values=true\|false` | `false` | Include property values. Secret-like keys remain redacted. |
+| `report=full\|minimal` | `full` | `minimal` returns the reduced inventory described under **Minimal report**. With `space` one space, without it every space; `format` applies. |
 
 Example: `?space=ABC&format=json&values=false`. The **Values** control changes the same setting in HTML. Use `values=true` only when report recipients are authorized to see configuration values.
 
@@ -78,6 +79,25 @@ Each space is written exactly as the single export on its report page would writ
 
 A failed space does not stop the run. After the run, every space that failed or was written with a warning is listed with its reason, and **Retry failed** runs only the failed ones again. Retrying is safe: an existing page is updated, not duplicated. **Stop after the current space** ends the run after the write in progress; the rest is not touched. Keep the tab open until the run has finished: the run happens in the browser, and the page warns before it is closed during a run.
 
+## Minimal report
+
+The minimal report is a reduced inventory of every space: **Bereichskey** (linked to `<confluence-base-url>/display/<KEY>/`), **Bereichsname**, **Bereichsbeschreibung**, **Kategorie**, **Administratoren**, **Anzahl Seiten**, **Verwendete Apps**, **Anzahl App-Makros** and **Anzahl User-Makros**. It is an option on this endpoint, not a separate tool, and it leaves the inventory, the full report and its export unchanged.
+
+- `?report=minimal` lists every space as HTML, `&format=json` or `&format=csv` as data, and `&space=ABC` narrows it to one space.
+- Key, name, description, categories, administrators and page count are stored facts, read with set-based statements over the whole estate. **Kategorie** lists the space categories (team labels). **Administratoren** are the holders of the space permission `SETSPACEPERMISSIONS`: groups by name and users by display name. Groups are not expanded. **Anzahl Seiten** counts current pages, as [Space information](confluence-space-information.md) does.
+- **Verwendete Apps**, **Anzahl App-Makros** and **Anzahl User-Makros** come from the macro usage scan of the app footprint, built into this endpoint; the `appFootprint` endpoint does not need to be installed. Apps provided by the system are not counted as apps. The counts are distinct macros used in the space, not occurrences. The scan reads the content index once per request for the whole instance, with a budget of 120 seconds. Figures from a scan that ran out of budget or lost a macro name are marked with `*` as a lower bound. On a Confluence that offers no macro usage query the three columns say `not measured`, never zero.
+- A value that could not be read says `unreadable` with the reason; it is never written as empty or zero.
+
+### Export the minimal report
+
+In the space inventory, tick the spaces, choose the target space and overview page as for the bulk export, tick **Minimal report** and press **Export selected (N)**. The run reads the minimal report of every space once at its start, including the macro scan, then writes each space as its own page titled `Confluence space overview - KEY`, holding one table with one row. The selected parent receives a separate summary table, one row per space, next to the overview of the full export if there is one. Each page and the summary are written in the same export transaction as a full export. Neither export ever adopts the other's pages.
+
+**Topics (Themengebiete).** Every page starts with the topic columns **Themengebiet 1** and **Themengebiet 2** while no topic is known yet. Fill them in, rename them, or add a column to the table on a space page in the Confluence editor, give it a heading and fill it in. On every later export of that space the column is read back and kept verbatim, including lozenges and links; the generated columns are rewritten. A topic found on one page is added to the summary table, and every space page exported afterwards receives the same topic column, empty, so all pages carry one topic set. The summary table shows the topics of each page. It is rewritten from the space pages on every export, so a change made directly in the summary is overwritten; fill in topics on the space pages. A change on a space page reaches the summary with the next export of that space.
+
+The read of an existing space page is fail-closed, like the Remark carry-over: a page without the minimal marker, a missing or repeated generated column, a repeated topic heading, a column without a heading that holds content, more than one data row, merged cells or a nested table refuse the write for that space.
+
+A summary row whose space no longer exists is kept and marked **NO LONGER EXISTS**; delete it by hand if it is not needed. If the space list cannot be read, nothing is marked. The minimal report is not recorded in the export log. With **Minimal report** ticked, the green **in overview** marks refer to the summary table.
+
 ## Limits and troubleshooting
 
 - **403:** use a member of `confluence-administrators` and check the group gate on both routes.
@@ -87,4 +107,4 @@ A failed space does not stop the run. After the run, every space that failed or 
 - **Export refused:** check permissions, destination, parent, and the marker on an existing page. Do not remove the marker to force an overwrite.
 - **No space marked as exported:** the blue marks come from the export log; if the log cannot be read, the page says so at the top instead of showing every space as not exported. The green marks need a picked overview page; a typed title that was not picked marks nothing, and an overview table that cannot be read says so in the note above the table.
 
-This endpoint does not count pages or run CQL. Use [Space information](confluence-space-information.md) for a page inventory. Treat reports and exported pages as administrator data, especially with `values=true`.
+Apart from the optional minimal report, this endpoint does not count pages or run CQL. Use [Space information](confluence-space-information.md) for a page inventory. Treat reports and exported pages as administrator data, especially with `values=true`.

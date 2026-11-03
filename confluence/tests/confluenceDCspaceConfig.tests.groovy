@@ -551,17 +551,20 @@ ok("and calls the number its own rather than the population",
 /* Filtering and sorting are client-side over the delivered rows on purpose: the
  * page has to keep working after it has been saved or mailed on. The only requests
  * on the page belong to the bulk export below the table, which sends nothing until
- * its own button is pressed: one fetch in exportPost and one in exportOne. */
+ * its own button is pressed: one fetch in exportPost, one in exportOne and, for
+ * the minimal report, one in minimalRow, which reads every space once per run. */
 def scriptFunction = { String page, String name ->
     int at = page.indexOf("function " + name + "(")
     if (at < 0) { return "" }
     int next = page.indexOf("\nfunction ", at + 1)
     return next < 0 ? page.substring(at) : page.substring(at, next)
 }
-check("the page carries the two requests of the bulk export and no other",
-    estatePage.split("fetch[(]", -1).length - 1, 2)
+check("the page carries the three requests of the bulk export and no other",
+    estatePage.split("fetch[(]", -1).length - 1, 3)
 ok("one of them is the export's own transport", scriptFunction(estatePage, "exportPost").contains("fetch("))
 ok("and the other reads one report for the bulk export", scriptFunction(estatePage, "exportOne").contains("fetch("))
+ok("and the third reads the minimal report once per run",
+    scriptFunction(estatePage, "minimalRow").contains("fetch(") && scriptFunction(estatePage, "minimalRow").contains("report=minimal"))
 ok("no XMLHttpRequest reaches the sweep", !estatePage.contains("XMLHttpRequest"))
 ok("the filter issues no request",
     !scriptFunction(estatePage, "filterEstate").contains("fetch(") && !scriptFunction(estatePage, "filterEstate").contains("exportPost"))
@@ -2305,6 +2308,7 @@ ok("OP-1458 the JSON carries no dropped link either",
 
 new GroovyShell(getClass().classLoader, new Binding([product: 'confluence', renderDetail: { Map request -> Cx.render(request, null) }])).evaluate(new File(System.getProperty('repoRoot', '.'), 'tools/tests/export-overview.tests.groovy'))
 new GroovyShell(getClass().classLoader, new Binding([product: 'confluence'])).evaluate(new File(System.getProperty('repoRoot', '.'), 'tools/tests/export-log.tests.groovy'))
+new GroovyShell(getClass().classLoader, new Binding([product: 'confluence'])).evaluate(new File(System.getProperty('repoRoot', '.'), 'tools/tests/minimal-report.tests.groovy'))
 
 /* ---- result --------------------------------------------------------------- */
 

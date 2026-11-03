@@ -14,10 +14,10 @@ List<List<String>> columns = minimal.columns(product)
 String keyLabel = columns[0][1]
 String expectedHref = product == 'jira' ? 'https://jira.example/jira/projects/APL/issues' : 'https://wiki.example/confluence/display/APL/'
 
-Map item = [key: [value: 'APL'], name: [value: 'ART & Plattform'], lead: [value: 'Pius Höltschi'],
+Map item = [key: [value: 'APL'], name: [value: 'ART & Plattform'], lead: [value: 'Pius H\u00f6ltschi'],
             admins: [value: ['jira-admins', 'Daniel Tobler']], category: [value: 'SWEP-Streams'],
             issues: [value: '7226'], lastUpdate: [value: '30.10.2026'],
-            description: [value: 'Bereich für ART <Plattform>'], pages: [value: '412'],
+            description: [value: 'Bereich f\u00fcr ART <Plattform>'], pages: [value: '412'],
             apps: [value: ['Draw.io', 'Gliffy']], appMacros: [value: '3', state: 'partial'],
             userMacros: [state: 'notMeasured', note: 'the content index could not be read']]
 
@@ -159,7 +159,7 @@ class PagerFilter { int max; PagerFilter(int max) { this.max = max } }
 """ + functions + '\nreturn this')
     Class loader = collectors.class
     def type = { String name -> collectors.class.classLoader.loadClass(name) }
-    def user = type('ApplicationUser').newInstance(displayName: 'Pius Höltschi')
+    def user = type('ApplicationUser').newInstance(displayName: 'Pius H\u00f6ltschi')
     def project = type('Project').newInstance(key: 'APL', name: 'ART Plattform', id: 10L, lead: user,
         category: type('ProjectCategory').newInstance(name: 'SWEP-Streams'))
     def actors = [type('RoleActor').newInstance(descriptor: 'jira-admins'), type('RoleActor').newInstance(descriptor: 'Daniel Tobler')] as Set
@@ -172,7 +172,7 @@ class PagerFilter { int max; PagerFilter(int max) { this.max = max } }
                    searchService: search, user: user]
     Map row = collectors.minimalRow(project, context)
     verify(row.key.value == 'APL' && row.name.value == 'ART Plattform', 'key and name are read')
-    verify(row.lead.value == 'Pius Höltschi', 'the lead is read by display name')
+    verify(row.lead.value == 'Pius H\u00f6ltschi', 'the lead is read by display name')
     verify(row.admins.value == ['Daniel Tobler', 'jira-admins'], 'role actors are users and groups, sorted, not expanded')
     verify(row.category.value == 'SWEP-Streams', 'the category is read')
     verify(row.issues.value == '7226', 'the issue count comes from the IssueManager call')

@@ -4898,6 +4898,52 @@ class MinimalReport {
         [storage: out.toString(), sections: sections, topics: topics] as Map<String, Object>
     }
 
+    /* GET ?report=minimal&format=csv: one row per object, the values as the page shows them. */
+    static String csv(String product, List<Map<String, Object>> rows) {
+        StringBuilder out = new StringBuilder()
+        List<String> header = new ArrayList<String>()
+        for (List<String> column : columns(product)) {
+            header.add(Pc.csv(column.get(1)))
+        }
+        out.append(header.join(";")).append("\n")
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> values = Cx.sub(row, "minimal")
+            List<String> cells = new ArrayList<String>()
+            for (List<String> column : columns(product)) {
+                cells.add(Pc.csv(Cx.plainText(cell(product, null, column.get(0), values.get(column.get(0))))))
+            }
+            out.append(cells.join(";")).append("\n")
+        }
+        return out.toString()
+    }
+
+    static String htmlPage(String product, String baseUrl, String heading, String generatedAt, List<Map<String, Object>> rows) {
+        StringBuilder out = new StringBuilder()
+        out.append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n")
+        out.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
+        out.append("<title>").append(Pc.html(heading)).append("</title>\n<style>")
+        out.append("body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:24px;color:#172b4d}")
+        out.append("table{border-collapse:collapse}th,td{border:1px solid #dfe1e6;padding:6px 10px;text-align:left;vertical-align:top}")
+        out.append("th{background:#f4f5f7}em{color:#6b778c}</style>\n</head>\n<body>\n")
+        out.append("<h1>").append(Pc.html(heading)).append("</h1>\n<p>Generated ").append(Pc.html(generatedAt))
+        out.append(" by the minimal report v").append(Pc.html(Pc.VERSION)).append(". A value marked * is a lower bound.</p>\n")
+        out.append("<table><thead><tr>")
+        for (List<String> column : columns(product)) {
+            out.append("<th>").append(Pc.html(column.get(1))).append("</th>")
+        }
+        out.append("</tr></thead><tbody>\n")
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> values = Cx.sub(row, "minimal")
+            out.append("<tr>")
+            for (List<String> column : columns(product)) {
+                out.append("<td>").append(cell(product, baseUrl, column.get(0), values.get(column.get(0)))).append("</td>")
+            }
+            out.append("</tr>\n")
+        }
+        out.append("</tbody></table>\n</body>\n</html>\n")
+        return out.toString()
+    }
+
     /* Marks the overview rows whose key is not among the existing ones, and unmarks a key
      * that exists again. Nothing is removed. Without a complete key list nothing changes. */
     static String markGone(String body, String product, String space, Set<String> existingKeys) {
@@ -8726,51 +8772,6 @@ Set<String> minimalExistingKeys(ProjectManager projectManager) {
     }
 }
 
-String minimalCsv(String product, List<Map<String, Object>> rows) {
-    StringBuilder out = new StringBuilder()
-    List<String> header = new ArrayList<String>()
-    for (List<String> column : MinimalReport.columns(product)) {
-        header.add(Pc.csv(column.get(1)))
-    }
-    out.append(header.join(";")).append("\n")
-    for (Map<String, Object> row : rows) {
-        Map<String, Object> values = Cx.sub(row, "minimal")
-        List<String> cells = new ArrayList<String>()
-        for (List<String> column : MinimalReport.columns(product)) {
-            cells.add(Pc.csv(Cx.plainText(MinimalReport.cell(product, null, column.get(0), values.get(column.get(0))))))
-        }
-        out.append(cells.join(";")).append("\n")
-    }
-    return out.toString()
-}
-
-String minimalHtml(String product, String baseUrl, String heading, String generatedAt, List<Map<String, Object>> rows) {
-    StringBuilder out = new StringBuilder()
-    out.append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n")
-    out.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
-    out.append("<title>").append(Pc.html(heading)).append("</title>\n<style>")
-    out.append("body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:24px;color:#172b4d}")
-    out.append("table{border-collapse:collapse}th,td{border:1px solid #dfe1e6;padding:6px 10px;text-align:left;vertical-align:top}")
-    out.append("th{background:#f4f5f7}em{color:#6b778c}</style>\n</head>\n<body>\n")
-    out.append("<h1>").append(Pc.html(heading)).append("</h1>\n<p>Generated ").append(Pc.html(generatedAt))
-    out.append(" by the minimal report v").append(Pc.html(Pc.VERSION)).append(". A value marked * is a lower bound.</p>\n")
-    out.append("<table><thead><tr>")
-    for (List<String> column : MinimalReport.columns(product)) {
-        out.append("<th>").append(Pc.html(column.get(1))).append("</th>")
-    }
-    out.append("</tr></thead><tbody>\n")
-    for (Map<String, Object> row : rows) {
-        Map<String, Object> values = Cx.sub(row, "minimal")
-        out.append("<tr>")
-        for (List<String> column : MinimalReport.columns(product)) {
-            out.append("<td>").append(MinimalReport.cell(product, baseUrl, column.get(0), values.get(column.get(0)))).append("</td>")
-        }
-        out.append("</tr>\n")
-    }
-    out.append("</tbody></table>\n</body>\n</html>\n")
-    return out.toString()
-}
-
 /* GET ?report=minimal. With project= one project, without it every project. A read;
  * it never writes. The JSON of one project is the payload the bulk export posts. */
 Object minimalResponse(Class responseClass, Report report, ProjectManager projectManager, String projectKey,
@@ -8803,7 +8804,7 @@ Object minimalResponse(Class responseClass, Report report, ProjectManager projec
     }
     String generatedAt = Pc.timestamp()
     if (format == "csv") {
-        return Http.ok(responseClass, minimalCsv("jira", rows), Http.CSV)
+        return Http.ok(responseClass, MinimalReport.csv("jira", rows), Http.CSV)
     }
     if (format == "json") {
         Map<String, Object> payload = new LinkedHashMap<String, Object>()
@@ -8822,7 +8823,7 @@ Object minimalResponse(Class responseClass, Report report, ProjectManager projec
         payload.put("executionMs", Long.valueOf(System.currentTimeMillis() - started))
         return Http.ok(responseClass, JsonOutput.prettyPrint(JsonOutput.toJson(payload)), Http.JSON)
     }
-    return Http.ok(responseClass, minimalHtml("jira", report.instanceBaseUrl, "Jira projects, minimal report", generatedAt, rows), Http.HTML)
+    return Http.ok(responseClass, MinimalReport.htmlPage("jira", report.instanceBaseUrl, "Jira projects, minimal report", generatedAt, rows), Http.HTML)
 }
 
 /* The export log store of this instance: SAL's PluginSettingsFactory, reached by

@@ -216,4 +216,51 @@ Map lostExport = handler.export(payload())
 assert !lostExport.ok && !lostExport.written : lostExport
 assert untouchedSettings.settings.values.isEmpty() : 'a rolled-back export must leave no log entry: ' + untouchedSettings.settings.values
 println 'PASS: the export log is written after the commit, read back, and never fails the export'
+
+/* The minimal report through the actual export branch: page, summary, topics and one topic set. */
+Store minimalStore = new Store()
+wire(minimalStore)
+ComponentLocator.components.remove(settingsType)
+def minimalPayload = { String key, String name -> [mode: 'minimal', spaceKey: 'DOC', title: MinimalReport.title('confluence', key),
+    parentPageId: '', parentTitle: 'Space overview', space: [key: key, name: name],
+    minimal: [key: [value: key], name: [value: name], description: [value: 'About ' + name], category: [value: ['safe']],
+              admins: [value: ['confluence-admins']], pages: [value: '12'], apps: [value: ['Draw.io']],
+              appMacros: [value: '1'], userMacros: [value: '0']]] }
+Map minimalFirst = handler.export(minimalPayload('ALPHA', 'Alpha'))
+assert minimalFirst.ok && minimalFirst.written && minimalFirst.mode == 'minimal' && minimalFirst.overview.state == 'updated' : minimalFirst
+assert minimalFirst.exportLog.state == 'skipped' : minimalFirst
+Page alphaPage = minimalStore.pages[minimalFirst.pageId as long]
+assert alphaPage.body.contains(MinimalReport.CONFLUENCE_MARKER) && !alphaPage.body.contains(Cx.MARKER)
+String summaryProduct = MinimalReport.overviewProduct('confluence')
+assert ConfigOverview.read(minimalStore.byId(minimalFirst.parentPageId as long).body, summaryProduct, 'DOC').rows.size() == 1
+alphaPage.body = alphaPage.body.replace('</th></tr>', '</th><th>Themengebiet 1</th></tr>').replace('</td></tr>', '</td><td>KI-Governance</td></tr>')
+minimalStore.nextRequest()
+Map alphaAgain = minimalPayload('ALPHA', 'Alpha')
+alphaAgain.parentPageId = minimalFirst.parentPageId
+alphaAgain.parentTitle = ''
+alphaAgain.minimal.pages = [value: '13']
+Map minimalSecond = handler.export(alphaAgain)
+assert minimalSecond.ok && minimalSecond.action == 'updated' && minimalSecond.topics == ['Themengebiet 1'] : minimalSecond
+assert minimalStore.byId(minimalFirst.pageId as long).body.contains('KI-Governance') : 'the topic survives the next export'
+assert minimalStore.byId(minimalFirst.pageId as long).body.contains('>13<') : 'generated values are rewritten'
+String summary = minimalStore.byId(minimalFirst.parentPageId as long).body
+assert summary.contains('KI-Governance') && MinimalReport.knownTopics(summary, 'confluence', 'DOC') == ['Themengebiet 1']
+minimalStore.nextRequest()
+Map beta = minimalPayload('BETA', 'Beta')
+beta.parentPageId = minimalFirst.parentPageId
+beta.parentTitle = ''
+Map minimalBeta = handler.export(beta)
+assert minimalBeta.ok && minimalBeta.topics == ['Themengebiet 1'] : minimalBeta
+assert minimalStore.byId(minimalBeta.pageId as long).body.contains('<th>Themengebiet 1</th>') : 'a new page is seeded with the topic set'
+assert ConfigOverview.read(minimalStore.byId(minimalFirst.parentPageId as long).body, summaryProduct, 'DOC').rows.size() == 2
+minimalStore.pages[minimalFirst.pageId as long].body = minimalStore.pages[minimalFirst.pageId as long].body.replace(MinimalReport.CONFLUENCE_MARKER, 'x')
+minimalStore.nextRequest()
+Map refusedMinimal = handler.export(alphaAgain)
+assert !refusedMinimal.ok && !refusedMinimal.written && refusedMinimal.stage == 'read' : refusedMinimal
+minimalStore.nextRequest()
+Map fullOnMinimalTitle = payload()
+fullOnMinimalTitle.title = MinimalReport.title('confluence', 'BETA')
+fullOnMinimalTitle.parentTitle = ''
+assert !handler.export(fullOnMinimalTitle).written : 'the full export never adopts a minimal page'
+println 'PASS: the minimal export writes its page and summary, keeps topics and seeds the topic set'
 ''', 'ExportLifecycleTests.groovy')

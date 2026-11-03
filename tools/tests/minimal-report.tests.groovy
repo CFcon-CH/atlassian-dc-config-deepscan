@@ -140,7 +140,7 @@ if (product == 'jira') {
     File repo = new File(System.getProperty('repoRoot', '.'))
     String source = new File(repo, 'jira/jiraDCprojectConfig.groovy').getText('UTF-8')
     String functions = source.substring(source.indexOf('Map<String, Object> minimalRead(Closure body) {'),
-        source.indexOf('String minimalCsv(String product'))
+        source.indexOf('/* GET ?report=minimal. With project= one project'))
     def collectors = new GroovyShell(getClass().classLoader).evaluate("""
 import org.codehaus.groovy.runtime.InvokerHelper
 class ApplicationUser { String displayName; String getDisplayName() { displayName } }
@@ -197,6 +197,145 @@ class PagerFilter { int max; PagerFilter(int max) { this.max = max } }
     verify(collectors.minimalExistingKeys(projects) == ['APL', 'ARC'] as Set, 'archived projects count as existing')
     verify(collectors.minimalExistingKeys(type('ProjectManager').newInstance(active: [project], archived: null)) == null,
         'an incomplete project list marks nothing')
+}
+
+/* ---- Confluence collectors, against stubs of the platform types they name ------ */
+if (product == 'confluence') {
+    File repo = new File(System.getProperty('repoRoot', '.'))
+    String source = new File(repo, 'confluence/confluenceDCspaceConfig.groovy').getText('UTF-8')
+    String scanSource = source.substring(source.indexOf('class MinimalScan {'),
+        source.indexOf('/* =============================================================================\n * REST Endpoint'))
+    GroovyClassLoader platform = new GroovyClassLoader(getClass().classLoader)
+    platform.parseClass('''package com.atlassian.confluence.search.v2
+interface SearchQuery {}
+enum Index { CONTENT }
+class SearchFieldMappings {
+    static final Field SPACE_KEY = new Field(name: 'spacekey')
+    static class Field { String name; String getName() { name } }
+}
+class SearchManager {
+    Map<String, List<String>> hits = [:]
+    Set<String> broken = [] as Set
+    List<String> asked = []
+    void scan(List indexes, SearchQuery query, Set<String> fields, java.util.function.Consumer<Map<String, String[]>> consumer) {
+        String name = query.name
+        asked << name
+        if (broken.contains(name)) { throw new IllegalStateException('index down') }
+        for (String space : hits.get(name) ?: []) { consumer.accept([spacekey: [space] as String[]]) }
+    }
+}
+''')
+    platform.parseClass('''package com.atlassian.confluence.search.v2.query
+class MacroUsageQuery implements com.atlassian.confluence.search.v2.SearchQuery { String name; MacroUsageQuery(String name) { this.name = name } }
+''')
+    platform.parseClass('''package com.atlassian.confluence.macro.browser
+interface MacroMetadataSource { Object getMacroMetadata() }
+class MacroMetadataManager { List entries = []; Collection getAllMacroMetadata() { entries } }
+''')
+    platform.parseClass('''package com.atlassian.plugin
+class PluginAccessor { List plugins = []; Collection getPlugins() { plugins } }
+''')
+    platform.parseClass('''package com.atlassian.plugin.metadata
+class PluginMetadataManager { Set system = [] as Set; boolean isSystemProvided(Object plugin) { system.contains(plugin.key) } }
+''')
+    platform.parseClass('''package com.atlassian.confluence.renderer
+class UserMacroLibrary { Map macros = [:]; Map getMacros() { macros } }
+''')
+    Class scanClass = platform.parseClass('''
+import groovy.json.JsonOutput
+import org.codehaus.groovy.runtime.InvokerHelper
+import java.sql.Connection
+import com.atlassian.confluence.search.v2.Index
+import com.atlassian.confluence.search.v2.SearchFieldMappings
+import com.atlassian.confluence.search.v2.SearchManager
+import com.atlassian.confluence.search.v2.SearchQuery
+class ComponentLocator { static Map<Class, Object> components = [:]; static Object getComponent(Class type) { components.get(type) } }
+class Cw { static String firstIndexValue(Map<String, String[]> document, String field) { String[] v = document?.get(field); v ? v[0] : null } }
+class Scan { static final String CATEGORY_NAMESPACE = 'team'; static final String ADMIN_PERMISSION = 'SETSPACEPERMISSIONS' }
+class Db {
+    static Map<String, List<Map<String, String>>> answers = [:]
+    static Set<String> failing = [] as Set
+    static String why(Throwable error) { error.message }
+    static Map<String, Object> shape(Object connection, String table, List<String> columns) { [table: table] }
+    static String shapeProblem(Map<String, Object> shape) { failing.contains(shape.table) ? 'the table ' + shape.table + ' moved' : null }
+    static Map<String, Object> query(Object connection, String sql, List<String> arguments, List<String> columns, int cap) {
+        String hit = answers.keySet().find { sql.contains(it) }
+        [rows: hit == null ? [] : answers.get(hit), truncated: false, failure: null]
+    }
+}
+''' + scanSource, 'MinimalScanUnderTest.groovy')
+    scanClass = platform.loadClass('MinimalScan')
+    def type = { String name -> platform.loadClass(name) }
+    Class db = platform.loadClass('Db')
+    java.sql.Connection connection = [:] as java.sql.Connection
+    Class locator = platform.loadClass('ComponentLocator')
+    db.answers = [
+        'SELECT s.spacekey, s.spacename FROM spaces s ORDER BY': [[spacekey: 'APL', spacename: 'ART Plattform'], [spacekey: 'KIGOV', spacename: 'KI Governance']],
+        'JOIN bodycontent': [[spacekey: 'APL', body: '<p>Bereich f&uuml;r ART Plattform</p><p>Bestellt durch Daniel Tobler TOOLS-3169</p>']],
+        'JOIN content_label': [[spacekey: 'APL', name: 'safe'], [spacekey: 'APL', name: 'art']],
+        'FROM spacepermissions': [[spacekey: 'APL', permgroupname: 'confluence-administrators'],
+                                  [spacekey: 'APL', permusername: 'k1', username: 'dtobler', userdisplay: 'Daniel Tobler'],
+                                  [spacekey: 'APL', permusername: 'k2', username: 'nodisplay'],
+                                  [spacekey: 'KIGOV', permusername: 'k3']],
+        'COUNT(c.contentid)': [[spacekey: 'APL', pages: '412']],
+        'SELECT s.spacekey FROM spaces s': [[spacekey: 'APL'], [spacekey: 'KIGOV']]]
+    Map estate = scanClass.rows(connection, null)
+    verify(estate.failure == null && estate.rows.size() == 2 && estate.keys == ['APL', 'KIGOV'] as Set, 'every space is read in one pass')
+    Map apl = estate.rows[0].minimal
+    verify(apl.key.value == 'APL' && apl.name.value == 'ART Plattform', 'key and name are read')
+    verify(apl.description.value.startsWith('Bereich f') && !apl.description.value.contains('<p>'), 'the description is plain text')
+    verify(apl.category.value == ['art', 'safe'], 'categories are the team labels by name')
+    verify(apl.admins.value == ['confluence-administrators', 'Daniel Tobler', 'nodisplay'], 'administrators are groups and users, display name first')
+    verify(apl.pages.value == '412', 'the page count is read')
+    Map kigov = estate.rows[1].minimal
+    verify(kigov.pages.value == '0' && kigov.category.state == 'absent' && kigov.admins.value == ['k3'], 'a space without pages or categories is a measured zero')
+    verify(scanClass.rows(connection, 'kigov').rows*.space.key == ['KIGOV'], 'one space can be read on its own')
+    db.failing = ['cwd_user'] as Set
+    Map partial = scanClass.rows(connection, null)
+    verify(partial.rows[0].minimal.admins.state == 'failed' && partial.rows[0].minimal.pages.value == '412', 'a moved table costs its column only')
+    db.failing = ['spaces'] as Set
+    verify(scanClass.rows(connection, null).failure != null && scanClass.existingKeys(connection) == null, 'an unreadable space list is a failure, not an empty estate')
+    db.failing = [] as Set
+    verify(scanClass.existingKeys(connection) == ['APL', 'KIGOV'] as Set, 'the existing keys are every space key')
+
+    def search = type('com.atlassian.confluence.search.v2.SearchManager').newInstance()
+    search.hits = [drawio: ['APL', 'KIGOV'], 'drawio-sketch': ['APL'], gliffy: ['APL'], 'toc': ['APL'], 'my-macro': ['KIGOV']]
+    Class sourceType = type('com.atlassian.confluence.macro.browser.MacroMetadataSource')
+    def descriptor = { String name -> [getMacroMetadata: { -> new Expando(getMacroName: { -> name }) }].asType(sourceType) }
+    def plugins = [new Expando(key: 'com.drawio', getKey: { -> 'com.drawio' }, getName: { -> 'Draw.io' }, getModuleDescriptors: { -> [descriptor('drawio'), new Object()] }),
+                   new Expando(key: 'com.gliffy', getKey: { -> 'com.gliffy' }, getName: { -> 'Gliffy' }, getModuleDescriptors: { -> [descriptor('gliffy')] }),
+                   new Expando(key: 'confluence.macros.advanced', getKey: { -> 'confluence.macros.advanced' }, getName: { -> 'Advanced Macros' }, getModuleDescriptors: { -> [descriptor('toc')] })]
+    def pluginMetadata = type('com.atlassian.plugin.metadata.PluginMetadataManager').newInstance(system: ['confluence.macros.advanced'] as Set)
+    def catalogue = type('com.atlassian.confluence.macro.browser.MacroMetadataManager').newInstance(
+        entries: [new Expando(getMacroName: { -> 'drawio-sketch' }, getPluginKey: { -> 'com.drawio' })])
+    def library = type('com.atlassian.confluence.renderer.UserMacroLibrary').newInstance(macros: ['my-macro': new Expando(getName: { -> 'my-macro' }), unused: null])
+    locator.components = [(type('com.atlassian.confluence.search.v2.SearchManager')): search,
+        (type('com.atlassian.plugin.PluginAccessor')): type('com.atlassian.plugin.PluginAccessor').newInstance(plugins: plugins),
+        (type('com.atlassian.plugin.metadata.PluginMetadataManager')): pluginMetadata,
+        (type('com.atlassian.confluence.macro.browser.MacroMetadataManager')): catalogue,
+        (type('com.atlassian.confluence.renderer.UserMacroLibrary')): library]
+    Map macros = scanClass.macros(0L)
+    verify(macros.state == 'measured' && macros.note == null, 'a complete scan is measured: ' + macros.note)
+    verify(!search.asked.contains('toc'), 'macros of system-provided apps are not scanned')
+    verify(search.asked.containsAll(['drawio', 'drawio-sketch', 'gliffy', 'my-macro', 'unused']), 'descriptor, catalogue and user macro names are scanned')
+    verify(macros.apps.APL as List == ['Draw.io', 'Gliffy'] && macros.apps.KIGOV as List == ['Draw.io'], 'used apps per space')
+    verify(macros.appMacros.APL.size() == 3 && macros.appMacros.KIGOV.size() == 1, 'distinct app macros per space')
+    verify(macros.userMacros.KIGOV as List == ['my-macro'] && macros.userMacros.APL == null, 'distinct user macros per space')
+    Map values = [:]
+    scanClass.addMacros(values, 'APL', macros)
+    verify(values.apps.value == ['Draw.io', 'Gliffy'] && values.appMacros.value == '3' && values.userMacros.value == '0', 'the three columns of one space')
+    search.broken = ['gliffy'] as Set
+    Map broken = scanClass.macros(0L)
+    verify(broken.state == 'partial' && broken.note.contains('1 macro name(s) whose scan failed'), 'a failed name makes the figures a lower bound')
+    Map lower = [:]
+    scanClass.addMacros(lower, 'KIGOV', broken)
+    verify(MinimalReport.cell('confluence', null, 'appMacros', lower.appMacros) == '1 *', 'a lower bound is shown with its asterisk')
+    Map none = [:]
+    scanClass.addMacros(none, 'APL', [state: 'failed', note: 'this Confluence offers no macro usage query'])
+    verify(none.apps.state == 'notMeasured' && MinimalReport.cell('confluence', null, 'userMacros', none.userMacros).contains('not measured'),
+        'a scan that cannot run is not measured, never zero')
+    locator.components.remove(type('com.atlassian.confluence.search.v2.SearchManager'))
+    verify(scanClass.macros(0L).state == 'failed', 'without a search manager nothing is measured')
 }
 
 println 'MINIMAL ' + product + ': ' + checks + ' checks passed'
